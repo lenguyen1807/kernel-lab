@@ -6,9 +6,10 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "ninja",
+    "numpy",
+    "nsight-python; sys_platform == 'linux'",
     "torch",
     "triton; sys_platform != 'darwin'",
-    "numpy"
 ]
 
 [project.scripts]

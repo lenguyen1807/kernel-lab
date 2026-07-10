@@ -8,40 +8,40 @@ This is a small experiment harness, not a production kernel library. The point i
 
 ```text
 docs/                   Short notes on profiling, roofline reasoning, and machines.
-lab/cli.py              Tiny runner: `uv run cuda-lab test 00_relu`.
+lab/cli.py              Tiny runner: `uv run cuda-lab test 01_vecadd`.
 lab/harness/            Python helpers for loading extensions, checking, timing, roofline math.
 lab/kernels/common/     Shared C++/CUDA helpers.
-lab/kernels/00_relu/    Small complete example and writeup.
+lab/kernels/01_vecadd/  Vector-add CUDA implementations and profiler script.
 results/                Raw outputs, tables, and profiler captures.
 ```
 
 ## Start Here
 
-Run the ReLU example on a CUDA machine:
+Run the vector-add example on a CUDA machine:
 
 ```bash
-uv run cuda-lab test 00_relu
-uv run cuda-lab bench 00_relu
+uv run cuda-lab test 01_vecadd
+uv run cuda-lab bench 01_vecadd
 ```
 
-Read the kernel writeup:
-
-```text
-lab/kernels/00_relu/README.md
-```
-
-Profile it manually:
+Profile it from Python on a CUDA/Linux machine with Nsight Compute installed:
 
 ```bash
-ncu --set full --import-source on -o results/profiles/relu uv run cuda-lab bench 00_relu
+uv run cuda-lab profile 01_vecadd
 ```
+
+This produces CSV and Nsight Compute artifacts under
+`results/profiles/01_vecadd/`. macOS is supported for editing the lab, but
+profiling runs only on a CUDA-capable Linux machine. See
+[`docs/profiling.md`](docs/profiling.md) for prerequisites and how to add a
+profile script for another kernel.
 
 ## Adding a Kernel
 
-Copy the ReLU example, then replace the kernel-specific pieces:
+Copy the vector-add example, then replace the kernel-specific pieces:
 
 ```bash
-cp -r lab/kernels/00_relu lab/kernels/02_matmul
+cp -r lab/kernels/01_vecadd lab/kernels/02_matmul
 ```
 
 Expected folder shape:
@@ -51,6 +51,7 @@ README.md       Real writeup: problem, estimates, results, failures.
 reference.py    PyTorch reference.
 test.py         Correctness cases.
 bench.py        Benchmark cases.
+profile.py      Nsight Python profile cases.
 cuda/
   ext.cpp       PyTorch binding.
   naive.cu      CUDA kernel and launcher.

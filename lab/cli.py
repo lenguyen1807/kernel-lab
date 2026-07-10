@@ -8,6 +8,14 @@ from pathlib import Path
 KERNELS_DIR = Path(__file__).resolve().parent / "kernels"
 
 
+def ensure_profile_platform() -> None:
+    if sys.platform != "linux":
+        raise SystemExit(
+            "cuda-lab profile must run on a CUDA-capable Linux host; "
+            "macOS supports editing the profiling setup only."
+        )
+
+
 def run_kernel_script(kernel: str, script_name: str) -> None:
     kernel_dir = (KERNELS_DIR / kernel).resolve()
     script_path = kernel_dir / f"{script_name}.py"
@@ -30,15 +38,17 @@ def run_kernel_script(kernel: str, script_name: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="cuda-lab",
-        description="Run CUDA lab kernel tests and benchmarks.",
+        description="Run CUDA lab kernel tests, benchmarks, and profiles.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for command in ("test", "bench"):
+    for command in ("test", "bench", "profile"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("kernel", help="kernel folder under lab/kernels")
 
     args = parser.parse_args(argv)
+    if args.command == "profile":
+        ensure_profile_platform()
     run_kernel_script(args.kernel, args.command)
 
 

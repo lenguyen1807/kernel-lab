@@ -12,6 +12,7 @@ if __name__ == "__main__":
         a = torch.randn(m, k, device="cuda", dtype=torch.float32)
         b = torch.randn(k, n, device="cuda", dtype=torch.float32)
 
+        actual_cublas = module.matmul_cublas(a, b)
         actual = module.matmul_naive(a, b)
         actual_tiled = module.matmul_tiled(a, b)
         actual_1d_coarsening = module.matmul_1D_coarsening(a, b)
@@ -19,6 +20,7 @@ if __name__ == "__main__":
 
         expected = matmul_ref(a, b)
 
+        assert_close(actual_cublas, expected)
         assert_close(actual, expected)
         assert_close(actual_tiled, expected)
         assert_close(actual_1d_coarsening, expected)

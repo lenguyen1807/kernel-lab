@@ -99,6 +99,7 @@ def format_markdown_table(
         "Kernel",
         "Latency (ms)",
         "TFLOPS",
+        "GFLOPS",
         "GB/s",
         "% Peak",
         "Notes",

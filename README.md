@@ -17,6 +17,13 @@ results/                Raw outputs, tables, and profiler captures.
 
 ## Start Here
 
+After connecting to the CUDA machine over SSH, load the toolchain and project
+environment:
+
+```bash
+source ~/cuda-lab/scripts/setup_cuda_env.sh
+```
+
 Run the vector-add example on a CUDA machine:
 
 ```bash

@@ -24,8 +24,8 @@ if __name__ == "__main__":
         name="vecadd_fp32",
         # read a, b twice and write to c once
         # so total read is 2 * n and write is n
-        bytes_moved=total_bytes(a.element_size(), reads=2 * n, write=n),
-        flops=1,  # 1 add
+        bytes_moved=total_bytes(a.element_size(), reads=2 * n, writes=n),
+        flops=n,  # one add per output element
     )
 
     torch_latency = benchmark_ms(vecadd_ref, a, b)

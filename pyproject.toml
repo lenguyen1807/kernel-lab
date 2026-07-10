@@ -9,7 +9,7 @@ dependencies = [
     "numpy",
     "nsight-python; sys_platform == 'linux'",
     "torch",
-    "triton; sys_platform != 'darwin'",
+    "triton; sys_platform == 'linux'",
 ]
 
 [project.scripts]

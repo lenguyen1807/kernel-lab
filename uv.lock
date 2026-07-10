@@ -96,7 +96,7 @@ dependencies = [
     { name = "nsight-python", marker = "sys_platform == 'linux'" },
     { name = "numpy" },
     { name = "torch" },
-    { name = "triton", marker = "sys_platform != 'darwin'" },
+    { name = "triton", marker = "sys_platform == 'linux'" },
 ]
 
 [package.metadata]
@@ -105,7 +105,7 @@ requires-dist = [
     { name = "nsight-python", marker = "sys_platform == 'linux'" },
     { name = "numpy" },
     { name = "torch" },
-    { name = "triton", marker = "sys_platform != 'darwin'" },
+    { name = "triton", marker = "sys_platform == 'linux'" },
 ]
 
 [[package]]

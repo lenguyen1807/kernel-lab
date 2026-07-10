@@ -115,11 +115,11 @@ torch::Tensor matmul_2d_coarsening(torch::Tensor A, torch::Tensor B) {
 
   CHECK_MATRIX(A)
   CHECK_MATRIX(B)
-  TORCH_CHECK(A.shape()[1] == B.shape()[0], "A.shape[1] must equal B.shape[0]");
+  TORCH_CHECK(A.size(1) == B.size(0), "A.shape[1] must equal B.shape[0]");
 
-  int M = A.shape()[0];
-  int K = A.shape()[1];
-  int N = B.shape()[1];
+  int M = A.size(0);
+  int K = A.size(1);
+  int N = B.size(1);
 
   auto C = create_matrix({M, N});
 

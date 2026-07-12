@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
 import torch
+from triton.testing import do_bench
 
 
 @dataclass(frozen=True)
@@ -36,14 +37,6 @@ def benchmark_ms(
     rep: int = 100,
     **kwargs: Any,
 ) -> float:
-    try:
-        from triton.testing import do_bench
-    except ImportError as exc:
-        raise RuntimeError(
-            "benchmark_ms requires Triton. Run this on a CUDA/Linux environment "
-            "where the `triton` package is available."
-        ) from exc
-
     return float(
         do_bench(
             lambda: fn(*args, **kwargs), warmup=warmup, rep=rep, return_mode="median"

@@ -44,12 +44,12 @@ def profile_matmul(n: int) -> None:
 
     # Each annotate label becomes one plot series.
     # torch.matmul may use cuBLAS/cuBLASLt/CUTLASS; cublas is explicit cublasSgemm.
-    # with nsight.annotate("torch"):
-    #     matmul_ref(a, b)
+    with nsight.annotate("torch"):
+        matmul_ref(a, b)
     with nsight.annotate("cublas"):
         module.matmul_cublas(a, b)
-    # with nsight.annotate("naive"):
-    #     module.matmul_naive(a, b)
+    with nsight.annotate("naive"):
+        module.matmul_naive(a, b)
     with nsight.annotate("tiled"):
         module.matmul_tiled(a, b)
     with nsight.annotate("1D_coarsening"):

@@ -4,6 +4,7 @@ import matplotlib as mpl
 import nsight
 import torch
 from reference import vecadd_ref
+from triton_dsl import vecadd_triton
 
 from lab.harness import RESULTS_DIR, load_kernel_extension
 
@@ -46,6 +47,8 @@ def profile_vecadd(n: int) -> None:
         module.vecadd_cuda(a, b)
     with nsight.annotate("vecadd_cuda_float4"):
         module.vecadd_cuda_float4(a, b)
+    with nsight.annotate("vecadd_trition"):
+        vecadd_triton(a, b)
 
 
 if __name__ == "__main__":

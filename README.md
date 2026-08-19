@@ -1,95 +1,180 @@
 # CUDA Lab
 
-My minimal CUDA learning lab for LLM inference kernels.
+A personal lab for learning to write CUDA kernels for LLM inference.
 
-This is a small experiment harness, not a production kernel library. The point is to make the compile/test/bench loop boring so the hard work can stay on kernel reasoning: correctness, memory traffic, roofline estimates, and benchmark evidence.
+Every kernel here exists twice: once as CUDA source, once as a written argument
+for why it should be fast. The harness is deliberately small — its only job is
+to make the compile → test → benchmark loop boring, so the interesting work
+stays where it belongs: counting bytes, estimating rooflines, and explaining the
+gap between what you predicted and what the GPU did.
 
-## Structure
+This is not a kernel library. Do not depend on it.
+
+## Quickstart
+
+On the CUDA machine, after SSH:
+
+```bash
+source scripts/setup_cuda_env.sh     # toolchain, venv, sanity checks
+uv run cuda-lab test  02_matmul      # are the kernels correct?
+uv run cuda-lab bench 02_matmul      # how fast are they?
+```
+
+`bench` prints one table per shape:
 
 ```text
-docs/                   Short notes on profiling, roofline reasoning, and machines.
-lab/cli.py              Tiny runner: `uv run cuda-lab test 01_vecadd`.
-lab/harness/            Python helpers for loading extensions, checking, timing, roofline math.
-lab/kernels/common/     Shared C++/CUDA helpers.
-lab/kernels/01_vecadd/  Vector-add CUDA implementations and profiler script.
-results/                Raw outputs, tables, and profiler captures.
+### 2048x2048x2048
+
+| Kernel        |      ms | TFLOP/s |   GB/s | vs torch |
+| ------------- | ------: | ------: | -----: | -------: |
+| torch         |  ...    |   ...   |  ...   |    1.00x |
+| cublas        |  ...    |   ...   |  ...   |    ...   |
+| naive         |  ...    |   ...   |  ...   |    ...   |
+| tiled         |  ...    |   ...   |  ...   |    ...   |
 ```
 
-## Start Here
+(Layout only — fill in your own numbers, and record the GPU alongside them.)
 
-After connecting to the CUDA machine over SSH, load the toolchain and project
-environment:
+Add `--plot` for a latency-vs-size curve under `results/bench/<kernel>/`.
+
+Each `main.py` also runs standalone, which is handy under a debugger or
+`compute-sanitizer`:
 
 ```bash
-source ~/cuda-lab/scripts/setup_cuda_env.sh
+python lab/kernels/02_matmul/main.py bench --plot
 ```
 
-Run the vector-add example on a CUDA machine:
+## The three commands
+
+| Command | What it answers | Cost |
+| --- | --- | --- |
+| `test` | Is it correct? | instant |
+| `bench` | How fast is it? | seconds |
+| `profile` | *Why* is it that fast? | minutes |
+
+**Use `bench` for numbers and `profile` for explanations.** Nsight Compute
+replays every annotated region once per metric pass, with cache flushes and
+locked clocks in between, so its cost scales with `shapes × variants × runs`
+regardless of how quick your kernel is. It is the right tool for occupancy,
+warp stalls, and memory throughput at *one* shape. It is the wrong tool for
+drawing a curve — that is what `bench` is for.
+
+If you do want Nsight-measured durations across the whole sweep, they are one
+flag away, and they will take minutes:
 
 ```bash
-uv run cuda-lab test 01_vecadd
-uv run cuda-lab bench 01_vecadd
+uv run cuda-lab bench   02_matmul --nsight   # same sweep, Nsight timing
+uv run cuda-lab profile 02_matmul            # counters at the largest shape
+uv run cuda-lab profile 02_matmul --shape 1024
 ```
 
-Profile it from Python on a CUDA/Linux machine with Nsight Compute installed:
+Expect `bench` and `bench --nsight` to agree on kernel *ordering* but not on
+absolute numbers: Nsight locks clocks to base, so everything looks slower.
+
+On hosts where the driver restricts performance counters to root, use the
+wrapper from the setup script, which keeps the venv and fixes file ownership
+afterwards:
 
 ```bash
-uv run cuda-lab profile 01_vecadd
+cuda_lab_profile 02_matmul
 ```
 
-This produces CSV and Nsight Compute artifacts under
-`results/profiles/01_vecadd/`. macOS is supported for editing the lab, but
-profiling runs only on a CUDA-capable Linux machine. See
-[`docs/profiling.md`](docs/profiling.md) for prerequisites and how to add a
-profile script for another kernel.
-
-## Adding a Kernel
-
-Copy the vector-add example, then replace the kernel-specific pieces:
-
-```bash
-cp -r lab/kernels/01_vecadd lab/kernels/02_matmul
-```
-
-Expected folder shape:
+## Repo map
 
 ```text
-README.md       Real writeup: problem, estimates, results, failures.
-reference.py    PyTorch reference.
-test.py         Correctness cases.
-bench.py        Benchmark cases.
-profile.py      Nsight Python profile cases.
-cuda/
-  ext.cpp       PyTorch binding.
-  naive.cu      CUDA kernel and launcher.
-  tiled.cu      More variants as needed.
-triton/         Optional Triton variants later.
-cutlass/        Optional CUTLASS/CuTe experiments later.
+lab/harness.py            The whole harness: build, test, bench, profile.
+lab/cli.py                Finds lab/kernels/<kernel>/main.py and runs it.
+lab/kernels/utils.h       Shared CUDA macros (CHECK_INPUT, CUDA_CHECK, ...).
+lab/kernels/00_template/  Copy this to start a kernel.
+lab/kernels/01_vecadd/    Memory-bound baseline: CUDA, float4, Triton.
+lab/kernels/02_matmul/    Simon Boehm's ladder: naive → tiled → 1D → 2D.
+lab/kernels/02_matmul_pmpp/  Same algorithms, PMPP indexing idiom.
+docs/                     Profiling, roofline, and machine notes.
+results/bench/<kernel>/   bench.csv, bench.png
+results/profiles/<kernel>/  Nsight CSVs, charts, .ncu-rep
 ```
 
-The harness compiles every `*.cpp`, `*.cc`, and `*.cu` file in the kernel's `cuda/` directory, so a matmul folder can grow from `naive.cu` to `tiled.cu`, `vectorized.cu`, etc. One `ext.cpp` should bind the launchers you want to call from Python.
+## Adding a kernel
 
-## Kernel Standard
+```bash
+cp -r lab/kernels/00_template lab/kernels/03_reduction
+```
 
-Each kernel `README.md` is the report. It should answer:
+A kernel folder is a `README.md`, a `main.py`, and a `cuda/` directory. The
+harness compiles **every** `.cpp`/`.cc`/`.cu` file under `cuda/`, so a folder
+can grow from `naive.cu` to `tiled.cu` to `vectorized.cu` without touching any
+build config. One `ext.cpp` binds the launchers you want to reach from Python.
 
-- problem;
-- baseline;
-- kernel variants;
-- expected bottleneck;
-- correctness tolerance;
-- benchmark shapes;
-- FLOP count;
-- bytes moved estimate;
-- arithmetic intensity;
-- roofline expectation;
-- benchmark table;
-- profiler evidence;
-- what failed;
-- next version.
+`main.py` is the whole Python side:
 
-Do not duplicate this in a separate reports folder. The source, benchmark, and writeup should live together.
+```python
+import torch
+from lab import harness
+
+ext = harness.load_kernel(__file__)      # compiles cuda/*, caches by folder name
+
+VARIANTS = {
+    "torch": torch.matmul,               # the reference is a variant too
+    "naive": ext.matmul_naive,
+    "tiled": ext.matmul_tiled,
+}
+
+def make_inputs(m, k, n):
+    return (torch.randn(m, k, device="cuda"), torch.randn(k, n, device="cuda"))
+
+if __name__ == "__main__":
+    harness.main(
+        VARIANTS,
+        make_inputs=make_inputs,
+        shapes=[(n, n, n) for n in (512, 1024, 2048, 4096)],
+        check_shapes=[(31, 17, 29), (128, 256, 64)],   # odd sizes catch guard bugs
+        ref=torch.matmul,
+        flops=lambda m, k, n: 2 * m * k * n,
+        nbytes=lambda m, k, n: 4 * (m * k + k * n + m * n),
+        limits={"naive": 2048},          # skip a variant once it is just slow
+    )
+```
+
+`flops` and `nbytes` are what turn latency into TFLOP/s and GB/s. Write them
+from the algorithm, not from the code — that is the number you compare your
+measurement against.
+
+## What a kernel README should answer
+
+The folder README is the report. There is no separate reports directory: source,
+benchmark, and writeup live together or they drift apart.
+
+1. **Problem and baseline.** What is computed, and what are you racing?
+2. **Variants and expected bottleneck.** Memory or compute, and why?
+3. **FLOPs, bytes, arithmetic intensity.** Written down *before* measuring.
+4. **Roofline expectation.** What fraction of peak should the best one reach?
+5. **Measured table.** `bench` output, plus which GPU produced it.
+6. **What failed, and what's next.** The section you will actually reread.
+
+If you cannot state the expected bottleneck before running the kernel, you are
+benchmarking without a hypothesis. See [`docs/roofline.md`](docs/roofline.md).
+
+## Gotchas
+
+- **Do not pin `TORCH_CUDA_ARCH_LIST`** unless you know why. Left unset, PyTorch
+  detects the real compute capability. Pinned to the wrong value and without a
+  `+PTX` suffix, the cubin will not load on your GPU at all.
+- **Extension names come from the folder name**, so `02_matmul` and
+  `02_matmul_pmpp` get separate build caches. Hardcoding the same name in two
+  folders makes torch rebuild everything each time you switch between them.
+- **Run `compute-sanitizer` after touching indexing**, before trusting any
+  number: `compute-sanitizer python lab/kernels/02_matmul/main.py test`.
+- **Never `torch.cuda.synchronize()` inside a variant.** It serialises the
+  benchmark loop and quietly inflates that one row.
+- **Allocate with `torch.empty`, not `torch.zeros`**, when the kernel overwrites
+  its output — `zeros` launches an extra fill kernel that shows up in profiles.
+- Kernel sources are compiled with `-lineinfo` (SASS maps back to source) and
+  `-Xptxas=-v` (per-kernel register and shared-memory usage in the build log).
 
 ## Acknowledgements
 
-This repo is inspired by [Gau Nernst's `learn-cuda`](https://github.com/gau-nernst/learn-cuda), especially the practical pattern of writing small kernels with PyTorch extension bindings and benchmarking through Triton.
+Inspired by [Gau Nernst's `learn-cuda`](https://github.com/gau-nernst/learn-cuda),
+especially the one-`main.py`-per-kernel layout and benchmarking through Triton's
+`do_bench`. Matmul variants follow [Simon Boehm's
+worklog](https://siboehm.com/articles/22/CUDA-MMM) and *Programming Massively
+Parallel Processors*.

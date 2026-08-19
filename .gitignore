@@ -71,5 +71,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
-profile.ncu-rep
-results/profiles/*.ncu-rep
+*.ncu-rep
+*.ncu-rep.lock

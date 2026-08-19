@@ -1,3 +1,11 @@
+"""`cuda-lab <command> <kernel> [options]` -> `lab/kernels/<kernel>/main.py`.
+
+Every kernel folder owns a single `main.py`; this only finds it and forwards
+the command through. Running that script directly works just as well:
+
+    python lab/kernels/02_matmul/main.py bench --plot
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -6,50 +14,39 @@ import sys
 from pathlib import Path
 
 KERNELS_DIR = Path(__file__).resolve().parent / "kernels"
+COMMANDS = ("test", "bench", "profile")
 
 
-def ensure_profile_platform() -> None:
-    if sys.platform != "linux":
-        raise SystemExit(
-            "cuda-lab profile must run on a CUDA-capable Linux host; "
-            "macOS supports editing the profiling setup only."
-        )
-
-
-def run_kernel_script(kernel: str, script_name: str) -> None:
-    kernel_dir = (KERNELS_DIR / kernel).resolve()
-    script_path = kernel_dir / f"{script_name}.py"
-
-    if not kernel_dir.is_dir():
-        raise SystemExit(f"Unknown kernel folder: {kernel}")
-    if not script_path.is_file():
-        raise SystemExit(f"{kernel} has no {script_name}.py")
-
-    sys.path.insert(0, str(kernel_dir))
-    try:
-        runpy.run_path(str(script_path), run_name="__main__")
-    finally:
-        try:
-            sys.path.remove(str(kernel_dir))
-        except ValueError:
-            pass
+def available() -> list[str]:
+    return sorted(
+        path.parent.name for path in KERNELS_DIR.glob("*/main.py") if not path.parent.name.startswith(".")
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="cuda-lab",
-        description="Run CUDA lab kernel tests, benchmarks, and profiles.",
+        description="Test, benchmark, and profile CUDA kernels.",
+        epilog="kernels: " + ", ".join(available()),
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("command", choices=COMMANDS)
+    parser.add_argument("kernel", help="folder under lab/kernels")
+    args, extra = parser.parse_known_args(argv)
 
-    for command in ("test", "bench", "profile"):
-        subparser = subparsers.add_parser(command)
-        subparser.add_argument("kernel", help="kernel folder under lab/kernels")
+    kernel_dir = (KERNELS_DIR / args.kernel).resolve()
+    script = kernel_dir / "main.py"
+    if not script.is_file():
+        raise SystemExit(f"No lab/kernels/{args.kernel}/main.py. Available: {', '.join(available())}")
 
-    args = parser.parse_args(argv)
-    if args.command == "profile":
-        ensure_profile_platform()
-    run_kernel_script(args.kernel, args.command)
+    # Kernel folders may import sibling packages (e.g. 01_vecadd/triton_dsl).
+    saved_argv = sys.argv
+    sys.path.insert(0, str(kernel_dir))
+    sys.argv = [str(script), args.command, *extra]
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    finally:
+        sys.path.remove(str(kernel_dir))
+        sys.argv = saved_argv
 
 
 if __name__ == "__main__":

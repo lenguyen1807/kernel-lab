@@ -1,4 +1,11 @@
-# Matmul kernel in PMPP style
+# Matmul, PMPP style
+
+```bash
+uv run cuda-lab test  02_matmul_pmpp
+uv run cuda-lab bench 02_matmul_pmpp --plot
+```
+
+## Full indices vs shifted pointers
 
 PMPP usually writes tiled GEMM with **full global indices**. Simon [^simon] or gau-nernst [^gau-nernst] often **shifts the base pointers first, then uses shorter local indices**. 
 

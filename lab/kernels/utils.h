@@ -4,7 +4,6 @@
 #include <torch/extension.h>
 
 #include <array>
-#include <cstdint>
 #include <stdexcept>
 #include <string>
 

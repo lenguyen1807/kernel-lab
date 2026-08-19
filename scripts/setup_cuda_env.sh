@@ -13,7 +13,9 @@ export CUDA_LAB_ROOT
 CUDA_LAB_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="$CUDA_HOME"
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.6}"
+# TORCH_CUDA_ARCH_LIST is deliberately not set: PyTorch then detects the real
+# compute capability. Pinning it (this used to say 8.6) builds a cubin for the
+# wrong architecture, and without a "+PTX" suffix it will not load at all.
 
 if [[ ! -d "$CUDA_HOME" ]]; then
     echo "CUDA toolkit not found at $CUDA_HOME" >&2
@@ -44,11 +46,11 @@ cd "$CUDA_LAB_ROOT" || return 1
 uv sync --locked || return 1
 
 # The NVIDIA driver on this host restricts performance counters to privileged
-# processes. This helper preserves the current CUDA/venv environment and fixes
-# ownership of profiler artifacts after the run.
+# processes, so only the Nsight commands need sudo. `cuda-lab bench` does not.
 cuda_lab_profile() {
     local kernel="${1:-01_vecadd}"
     local status
+    shift 2>/dev/null || true
 
     sudo -E env \
         HOME="$HOME" \
@@ -56,7 +58,7 @@ cuda_lab_profile() {
         CUDA_HOME="$CUDA_HOME" \
         CUDA_PATH="$CUDA_PATH" \
         LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-        "$CUDA_LAB_ROOT/.venv/bin/cuda-lab" profile "$kernel"
+        "$CUDA_LAB_ROOT/.venv/bin/cuda-lab" profile "$kernel" "$@"
     status=$?
     sudo chown -R "$(id -u):$(id -g)" "$CUDA_LAB_ROOT/results"
     return "$status"
@@ -68,5 +70,8 @@ nvidia-smi --query-gpu=name,driver_version,memory.total \
 echo "nvcc: $(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p')"
 echo "ncu:  $(ncu --version | tail -n 1)"
 echo "uv:   $(uv --version)"
-echo "Run:  uv run cuda-lab test 01_vecadd"
-echo "Profile (restricted counters): cuda_lab_profile 01_vecadd"
+python -c "import torch; print('arch:', 'sm_%d%d' % torch.cuda.get_device_capability())" 2>/dev/null
+echo
+echo "  uv run cuda-lab test  02_matmul          # correctness"
+echo "  uv run cuda-lab bench 02_matmul --plot   # latency, seconds"
+echo "  cuda_lab_profile      02_matmul          # Nsight counters, minutes"

@@ -37,16 +37,18 @@ torch::Tensor matmul_naive(torch::Tensor A, torch::Tensor B) {
   auto C = create_matrix({M, N});
 
   /*
-  - We can use this API to find block size for
-  maximum occupancy
+  - We can use this API to find block size for maximum occupancy
   - This does not mean it is the most optimal in terms of FLOPs
   reference:
   https://github.com/gau-nernst/learn-cuda/blob/main/02a_matmul_simt/matmul.cu
    */
-  int block_size_total;
-  int min_grid_size; // we don't need this
-  cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size_total,
-                                     matmul_naive_kernel, 0, 0);
+
+  static const int block_size_total = [] {
+    int block_size, min_grid_size; // min_grid_size unused
+    cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size,
+                                       matmul_naive_kernel, 0, 0);
+    return block_size;
+  }();
 
   dim3 blockDim(WARP_SIZE, block_size_total / WARP_SIZE, 1);
   dim3 gridDim((N + WARP_SIZE - 1) / WARP_SIZE,

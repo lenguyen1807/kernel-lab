@@ -37,7 +37,6 @@ def vecadd_triton(a: torch.Tensor, b: torch.Tensor):
 
     triton_add_kernel[grid](a, b, c, n_elements, BLOCK_SIZE=1024)
 
-    # sychronize before return
-    torch.cuda.synchronize()
-
+    # No torch.cuda.synchronize() here: the launch is async like every other
+    # variant, and syncing per call would serialise the benchmark loop.
     return c

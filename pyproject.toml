@@ -11,6 +11,7 @@ dependencies = [
     "nsight-python; sys_platform == 'linux'",
     "torch",
     "triton; sys_platform == 'linux'",
+    "tilelang>=0.1.13",
 ]
 
 [project.scripts]

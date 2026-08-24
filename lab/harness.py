@@ -93,6 +93,28 @@ def load_kernel(
     )
 
 
+class ShapeJIT:
+    """A variant that must be compiled per problem shape (tilelang, AoT tuning).
+
+    Wrap a factory `(*shape) -> callable(*inputs)`; the harness calls it once
+    per shape, caches the result, and treats the compiled callable like any
+    other variant -- so JIT cost lands outside the timed region.
+    """
+
+    def __init__(self, factory: Callable[..., Callable]) -> None:
+        self._factory = factory
+        self._cache: dict[Shape, Callable] = {}
+
+    def for_shape(self, shape: Shape) -> Callable:
+        if shape not in self._cache:
+            self._cache[shape] = self._factory(*shape)
+        return self._cache[shape]
+
+
+def _resolve(fn: Callable, shape: Shape) -> Callable:
+    return fn.for_shape(shape) if isinstance(fn, ShapeJIT) else fn
+
+
 # ---------------------------------------------------------------------- timing
 
 
@@ -176,15 +198,21 @@ def _run_test(variants, make_inputs, shapes, ref, tol) -> None:
     if ref is None:
         raise SystemExit("test needs a reference: pass ref=... to harness.main()")
 
-    kwargs = {"rtol": 1e-2, "atol": 1e-2, **(tol or {})}
     for shape in shapes:
+        kwargs = {"rtol": 1e-2, "atol": 1e-2}
+        if tol:
+            # tol may be a callable (*shape) -> mapping, for error bounds that
+            # scale with the shape (e.g. fp16 rounding over a k-reduction).
+            kwargs.update(tol(*shape) if callable(tol) else tol)
         args = make_inputs(*shape)
         expected = ref(*args)
         for label, fn in variants.items():
             if fn is ref:
                 continue
             try:
-                torch.testing.assert_close(fn(*args), expected, **kwargs)
+                torch.testing.assert_close(
+                    _resolve(fn, shape)(*args), expected, **kwargs
+                )
             except AssertionError as exc:
                 raise SystemExit(
                     f"\n{label} is wrong at {_fmt_shape(shape)}:\n{exc}"
@@ -217,7 +245,7 @@ def _run_bench(
             measured[label] = (
                 None
                 if limit is not None and max(shape) > limit
-                else bench_ms(fn, *args)
+                else bench_ms(_resolve(fn, shape), *args)
             )
         timings[shape] = measured
 
@@ -343,7 +371,7 @@ def _nsight_sweep(
         for label, fn in variants.items():
             if not skipped(label, shape):
                 with nsight.annotate(label):  # one region per launch -> one series
-                    fn(*args)
+                    _resolve(fn, shape)(*args)
 
     body = _named_fn(
         body, f"{stem}_sweep", list(inspect.signature(make_inputs).parameters)
@@ -390,16 +418,16 @@ def main(
     flops: Callable[..., float] | None = None,
     nbytes: Callable[..., float] | None = None,
     limits: Mapping[str, int] | None = None,
-    tol: Mapping[str, float] | None = None,
+    tol: Mapping[str, float] | Callable[..., Mapping[str, float]] | None = None,
 ) -> None:
     """Give a kernel folder its `test` / `bench` / `profile` commands.
 
-    variants     {label: callable(*inputs)} -- the reference belongs here too
+    variants     {label: callable(*inputs) | ShapeJIT(factory)} -- ref too
     make_inputs  shape -> tuple of tensors, passed to every variant
     shapes       benchmark sweep; check_shapes defaults to it
     flops/nbytes shape -> count, for the TFLOP/s and GB/s columns
     limits       {label: max dim} -- skip a variant once it gets too slow
-    tol          overrides for torch.testing.assert_close (rtol/atol)
+    tol          assert_close overrides (rtol/atol), or (*shape) -> mapping
     """
     # argv[0] is the kernel's main.py both via `cuda-lab` and standalone, so the
     # folder names the results dirs -- no load_kernel() call required.

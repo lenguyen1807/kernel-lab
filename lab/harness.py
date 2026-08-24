@@ -15,7 +15,10 @@ from __future__ import annotations
 import argparse
 import csv
 import inspect
+import io
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -296,10 +299,13 @@ def _run_bench(
                 writer.writerow(row)
     print(f"\nCSV: {csv_path}")
     if plot:
-        print(f"Plot: {_plot(timings, out_dir)}")
+        path = out_dir / "bench.png"
+        print(f"Plot: {_plot(timings, path, 'Latency vs size (CUDA events, median)')}")
 
 
-def _plot(timings: dict[Shape, dict[str, float | None]], out_dir: Path) -> Path:
+def _plot(
+    timings: dict[Shape, dict[str, float | None]], path: Path, title: str
+) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -319,11 +325,10 @@ def _plot(timings: dict[Shape, dict[str, float | None]], out_dir: Path) -> Path:
     axes.set(
         xscale="log", yscale="log", xlabel="size (largest dim)", ylabel="latency (ms)"
     )
-    axes.set_title("Latency vs size (CUDA events, median)")
+    axes.set_title(title)
     axes.grid(True, which="both", alpha=0.3)
     axes.legend()
     figure.tight_layout()
-    path = out_dir / "bench.png"
     figure.savefig(path, dpi=200)
     plt.close(figure)
     return path
@@ -341,18 +346,40 @@ def _named_fn(func, name, params):
     return namespace[name]
 
 
+def _over_limit(limits, label, shape) -> bool:
+    limit = limits.get(label)
+    return limit is not None and max(shape) > limit
+
+
+def _nsight_python_usable() -> bool:
+    """nsight-python drives the local ncu CLI and refuses anything older than
+    ncu 2026.2 (CUDA 13.3). On older toolkits the harness falls back to driving
+    ncu directly, so ask nsight's own version check instead of duplicating it."""
+    try:
+        import nsight  # noqa: F401
+        from nsight.collection.ncu import check_ncu_version
+
+        ncu = shutil.which("ncu")
+        return ncu is not None and check_ncu_version(ncu) is None
+    except Exception:
+        return False
+
+
 def _nsight_sweep(
     variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
 ):
     """Time the sweep with Nsight Compute instead of CUDA events. Costs minutes,
     not seconds: wall time scales with shapes x variants x runs."""
+    if not _nsight_python_usable():
+        return _ncu_sweep(
+            variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
+        )
     import nsight
 
     print(f"GPU: {torch.cuda.get_device_name()} (Nsight locks clocks to base)")
 
     def skipped(label, shape):
-        limit = limits.get(label)
-        return limit is not None and max(shape) > limit
+        return _over_limit(limits, label, shape)
 
     dropped = sorted(
         {label for shape in shapes for label in variants if skipped(label, shape)}
@@ -405,6 +432,175 @@ def _nsight_sweep(
     print(f"\nArtifacts: {out_dir}")
 
 
+# ------------------------------------------------------- ncu CLI fallback
+
+
+def _nvtx_probe(variants, make_inputs, label, shape_str, dims, stem) -> None:
+    """Run one variant once inside nested NVTX ranges `<stem>` > `<label>`, so
+    the ncu CLI fallback can profile exactly that launch; `--nvtx-include`
+    matches any enclosing range, so both names work as filters."""
+    if label not in variants:
+        raise SystemExit(f"unknown variant {label!r}; choices: {', '.join(variants)}")
+    parts = [int(p) for p in re.split(r"[,x]", shape_str) if p]
+    shape = tuple(parts * dims if len(parts) == 1 else parts)
+    fn = _resolve(variants[label], shape)
+    args = make_inputs(*shape)
+    fn(*args)  # warm up JIT/autotune outside the profiled range
+    torch.cuda.synchronize()
+    torch.cuda.nvtx.range_push(stem)
+    torch.cuda.nvtx.range_push(label)
+    fn(*args)
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.synchronize()
+    print(f"profiled {label} @ {_fmt_shape(shape)} (NVTX ranges: {stem}/{label})", file=sys.stderr)
+
+
+def _ncu_duration_ms(csv_text: str) -> tuple[float, int]:
+    """Sum gpu__time_duration.sum over the raw-page rows (a variant may launch
+    several kernels; the nsight path sums them too). Returns (ms, n_kernels)."""
+    metric = "gpu__time_duration.sum"
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    header = next(
+        (i for i, row in enumerate(rows) if any(c.startswith(metric) for c in row)),
+        None,
+    )
+    if header is None:
+        raise SystemExit(f"ncu output has no {metric} column:\n{csv_text[:2000]}")
+    col = next(i for i, c in enumerate(rows[header]) if c.startswith(metric))
+    unit, total, kernels = "us", 0.0, 0
+    for row in rows[header + 1 :]:
+        if col >= len(row):
+            continue
+        try:
+            total += float(row[col].replace(",", ""))
+            kernels += 1
+        except ValueError:
+            unit = row[col] or unit  # the units row directly under the header
+    scale = {
+        "ns": 1e-6,
+        "nsecond": 1e-6,
+        "us": 1e-3,
+        "usecond": 1e-3,
+        "ms": 1.0,
+        "msecond": 1.0,
+        "s": 1e3,
+        "second": 1e3,
+    }
+    if unit not in scale:
+        raise SystemExit(f"unexpected ncu duration unit {unit!r}")
+    return total * scale[unit], kernels
+
+
+def _ncu_sweep(
+    variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
+):
+    """Fallback for toolkits older than CUDA 13.3, where nsight-python rejects
+    the local ncu. Drives the ncu CLI directly: one process per
+    (shape, variant, run), NVTX-filtered down to a single annotated launch."""
+    ncu = shutil.which("ncu")
+    if ncu is None:
+        raise SystemExit(
+            "Cannot profile: nsight-python is unusable and no ncu on PATH."
+        )
+    version_out = subprocess.run([ncu, "--version"], capture_output=True, text=True)
+    found = re.search(r"Version (\S+)", version_out.stdout)
+    print(
+        "nsight-python needs ncu >= 2026.2 (CUDA 13.3); found "
+        f"{found.group(1) if found else 'unknown'} -- falling back to the ncu CLI."
+    )
+    print(f"GPU: {torch.cuda.get_device_name()} (Nsight locks clocks to base)")
+
+    active = {
+        label
+        for shape in shapes
+        for label in variants
+        if not _over_limit(limits, label, shape)
+    }
+    dropped = sorted(set(variants) - active)
+    if dropped:
+        print(
+            f"Skipping {', '.join(dropped)} above its limit -- use --shape to profile it smaller."
+        )
+    print(
+        f"ncu will launch ~{len(shapes) * len(active) * runs} processes "
+        f"({len(shapes)} shapes x {len(active)} variants x {runs} runs)."
+    )
+
+    script = Path(sys.argv[0]).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timings: dict[Shape, dict[str, float | None]] = {}
+    for shape in shapes:
+        measured: dict[str, float | None] = {}
+        for label in variants:
+            if _over_limit(limits, label, shape):
+                measured[label] = None
+                continue
+            cmd = [
+                ncu,
+                "--nvtx",
+                "--nvtx-include",
+                f"{label}/",
+                "--clock-control",
+                "base",
+                "--metrics",
+                "gpu__time_duration.sum",
+                "--page",
+                "raw",
+                "--csv",
+                sys.executable,
+                str(script),
+                "_nvtx-run",
+                label,
+                _fmt_shape(shape),
+            ]
+            samples, kernels = [], 0
+            for _ in range(runs):
+                proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+                if proc.returncode != 0:
+                    # ncu prints its ==ERROR== diagnostics to stdout, not stderr.
+                    sys.stderr.write(proc.stdout)
+                    raise SystemExit(
+                        f"ncu failed for {label} @ {_fmt_shape(shape)} "
+                        f"(exit {proc.returncode}); see output above."
+                    )
+                ms, kernels = _ncu_duration_ms(proc.stdout)
+                samples.append(ms)
+            measured[label] = sum(samples) / len(samples)
+            raw = "\n".join(
+                line
+                for line in proc.stdout.splitlines()
+                if not line.startswith("==")
+            )
+            (out_dir / f"{stem}_{label}_{_fmt_shape(shape)}.csv").write_text(raw + "\n")
+            print(
+                f"  {label:<12} {_fmt_shape(shape)}: "
+                f"{measured[label]:.4f} ms ({kernels} kernels)"
+            )
+        timings[shape] = measured
+
+    rows = [
+        [_fmt_shape(shape), label, "skipped" if ms is None else f"{ms:.4f}"]
+        for shape, measured in timings.items()
+        for label, ms in measured.items()
+    ]
+    print(f"\n{table(rows, ['shape', 'kernel', 'ms (gpu__time_duration.sum)'])}")
+
+    summary = out_dir / f"{stem}_summary.csv"
+    with summary.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["shape", "kernel", "latency_ms"])
+        for shape, measured in timings.items():
+            for label, ms in measured.items():
+                writer.writerow(
+                    [_fmt_shape(shape), label, "" if ms is None else f"{ms:.6f}"]
+                )
+    print(f"\nCSV: {summary}")
+    if plot_path:
+        print(f"Plot: {_plot(timings, plot_path, title)}")
+    print(f"Artifacts: {out_dir}")
+
+
 # ----------------------------------------------------------------------- entry
 
 
@@ -434,6 +630,14 @@ def main(
     stem = kernel_stem(Path(sys.argv[0]).resolve().parent)
     shapes = [tuple(shape) for shape in shapes]
     limits = limits or {}
+
+    # Hidden entry point for the ncu CLI fallback, invoked as
+    # `python main.py _nvtx-run <label> <shape>`; not part of the public CLI.
+    if len(sys.argv) > 1 and sys.argv[1] == "_nvtx-run":
+        _nvtx_probe(
+            variants, make_inputs, sys.argv[2], sys.argv[3], len(shapes[0]), stem
+        )
+        return
 
     parser = argparse.ArgumentParser(
         prog=f"cuda-lab ... {stem}", description=f"{stem} kernel lab"

@@ -52,12 +52,22 @@ cuda_lab_profile() {
     local status
     shift 2>/dev/null || true
 
+    # ncu serializes profiling through TMPDIR/nsight-compute-lock and never
+    # deletes it. In a sticky world-writable /tmp with fs.protected_regular=2,
+    # root cannot open a lock file owned by the user (and vice versa), so
+    # mixing sudo and non-sudo ncu runs deadlocks on EACCES. A private,
+    # non-sticky TMPDIR sidesteps protected_regular; ncu creates the lock
+    # 0666, so both root and the user can open it there.
+    local ncu_tmp="$HOME/.cache/cuda-lab-ncu"
+    mkdir -p "$ncu_tmp"
+
     sudo -E env \
         HOME="$HOME" \
         PATH="$CUDA_LAB_ROOT/.venv/bin:$PATH" \
         CUDA_HOME="$CUDA_HOME" \
         CUDA_PATH="$CUDA_PATH" \
         LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+        TMPDIR="$ncu_tmp" \
         "$CUDA_LAB_ROOT/.venv/bin/cuda-lab" profile "$kernel" "$@"
     status=$?
     sudo chown -R "$(id -u):$(id -g)" "$CUDA_LAB_ROOT/results"

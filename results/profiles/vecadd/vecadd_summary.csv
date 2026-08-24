@@ -1,0 +1,5 @@
+shape,kernel,latency_ms
+3355443,torch.add,0.023392
+3355443,cuda,0.025824
+3355443,cuda_float4,0.022720
+3355443,triton,0.027008

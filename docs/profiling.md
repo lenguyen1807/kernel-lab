@@ -3,6 +3,10 @@
 `bench` tells you *how fast*. `profile` tells you *why*. This note is about the
 second one.
 
+For the reasoning method behind profiling, including a worked vector-add
+example and PTX/SASS inspection, see
+[`profiling-fundamentals.md`](profiling-fundamentals.md).
+
 ## When to reach for Nsight
 
 Only after `cuda-lab bench` has told you which kernel is worth explaining, and
@@ -24,7 +28,9 @@ the kernel is. A sweep that `bench` finishes in seconds takes minutes here.
 - A CUDA-capable NVIDIA GPU on Linux.
 - Nsight Compute (`ncu`) on `PATH`.
 - `nsight-python`, declared as a Linux-only dependency so macOS can still edit
-  the lab. It drives Nsight Compute; it does not bundle it.
+  the lab. It drives Nsight Compute; it does not bundle it, and it refuses any
+  ncu older than 2026.2 (CUDA 13.3). On older toolkits the harness falls back
+  to driving the `ncu` CLI directly — see below.
 
 ## Running
 
@@ -71,6 +77,46 @@ for exactly this reason.
 
 `ncu --query-metrics` on the CUDA machine lists metrics you can add to a profile
 script. You should not need to hand-write an `ncu` command line.
+
+## The ncu CLI fallback (ncu < 2026.2)
+
+When nsight-python rejects the local `ncu`, `_nsight_sweep` delegates to
+`_ncu_sweep`, which drives the CLI itself:
+
+- `python main.py _nvtx-run <label> <shape>` — a hidden entry point in every
+  kernel's `main.py` — warms the variant up, then runs it once inside nested
+  NVTX ranges `<stem>` > `<label>`. `--nvtx-include` matches any enclosing
+  range, so filtering by the folder stem (`"vecadd/"`) or the variant label
+  (`"cuda/"`) both work.
+- One `ncu` process per (shape, variant, run):
+  `ncu --nvtx --nvtx-include "<label>/" --clock-control base --metrics gpu__time_duration.sum --page raw --csv ...`.
+  The raw CSV rows are summed per variant, matching what
+  `combine_kernel_metrics=lambda x, y: x + y` does for multi-kernel calls.
+- Artifacts mirror the nsight path: per-variant raw CSVs, a summary CSV, and
+  the sweep PNG for `--nsight`. There is no `.ncu-rep` — for that, run the
+  probe under `ncu` yourself with a fuller section set:
+
+```bash
+ncu --nvtx --nvtx-include "tiled/" --set full -o tiled \
+    python lab/kernels/02_matmul/main.py _nvtx-run tiled 2048x2048x2048
+```
+
+On hosts where counters are root-only, this manual run needs the same sudo
+treatment as `cuda_lab_profile`:
+
+```bash
+sudo -E env PATH="$PWD/.venv/bin:$PATH" TMPDIR="$HOME/.cache/cuda-lab-ncu" \
+    ncu --nvtx --nvtx-include "tiled/" --set full -o tiled \
+    .venv/bin/python lab/kernels/02_matmul/main.py _nvtx-run tiled 2048x2048x2048
+```
+
+The `TMPDIR` matters: ncu serializes profiling through
+`TMPDIR/nsight-compute-lock` and never deletes it. In a sticky world-writable
+`/tmp` with `fs.protected_regular=2` (the default on recent kernels), root
+cannot open a lock file owned by you, and you cannot open one owned by root —
+mixing sudo and non-sudo ncu runs then fails with `InterprocessLockFailed`.
+A private, non-sticky `TMPDIR` avoids this; `cuda_lab_profile` sets one
+automatically.
 
 ## Correctness first
 

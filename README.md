@@ -79,6 +79,11 @@ afterwards:
 cuda_lab_profile 02_matmul
 ```
 
+`nsight-python` requires ncu ≥ 2026.2 (CUDA 13.3). On older toolkits, `profile`
+and `bench --nsight` automatically fall back to driving the `ncu` CLI directly —
+one process per (shape, variant), NVTX-filtered to a single launch. Same
+artifacts, same locked clocks, a bit more process overhead.
+
 ## Repo map
 
 ```text

@@ -45,7 +45,9 @@ def _nvidia_wheel_paths() -> tuple[list[str], list[str]]:
 
     includes, ldflags = [], []
     for root in (Path(p).resolve() for p in getattr(nvidia, "__path__", [])):
-        includes += [str(p) for p in sorted(root.glob("cu[0-9]*/include"))]  # cu12/cu13, not cudnn
+        includes += [
+            str(p) for p in sorted(root.glob("cu[0-9]*/include"))
+        ]  # cu12/cu13, not cudnn
         for lib_dir in sorted(root.glob("cu[0-9]*/lib")):
             ldflags += [f"-L{lib_dir}", f"-Wl,-rpath,{lib_dir}"]
             # Wheel ships versioned sonames (libcublas.so.13), no libcublas.so.
@@ -59,32 +61,60 @@ def kernel_stem(kernel_dir: Path) -> str:
     return re.sub(r"^\d+[a-z]?_?", "", kernel_dir.name) or kernel_dir.name
 
 
-def load_kernel(file: str | Path, *, name: str | None = None, source_dir: str = "cuda",
-                flags: Sequence[str] = DEFAULT_FLAGS, verbose: bool = True):
+def load_kernel(
+    file: str | Path,
+    *,
+    name: str | None = None,
+    source_dir: str = "cuda",
+    flags: Sequence[str] = DEFAULT_FLAGS,
+    verbose: bool = True,
+):
     """Compile every C++/CUDA source under `<kernel folder>/cuda/` and load it.
 
     The extension name defaults to the kernel folder, so two folders never share
     a build cache (sharing one made torch rebuild on every switch).
     """
     kernel_dir = Path(file).resolve().parent
-    sources = sorted(p for pat in ("*.cpp", "*.cc", "*.cu") for p in (kernel_dir / source_dir).glob(pat))
+    sources = sorted(
+        p
+        for pat in ("*.cpp", "*.cc", "*.cu")
+        for p in (kernel_dir / source_dir).glob(pat)
+    )
     if not sources:
         raise FileNotFoundError(f"No C++/CUDA sources under {kernel_dir / source_dir}")
     includes, ldflags = _nvidia_wheel_paths()
-    return load(name=name or f"{kernel_stem(kernel_dir)}_ext", sources=[str(p) for p in sources],
-                extra_cuda_cflags=list(flags), extra_ldflags=ldflags,
-                extra_include_paths=includes, verbose=verbose)
+    return load(
+        name=name or f"{kernel_stem(kernel_dir)}_ext",
+        sources=[str(p) for p in sources],
+        extra_cuda_cflags=list(flags),
+        extra_ldflags=ldflags,
+        extra_include_paths=includes,
+        verbose=verbose,
+    )
 
 
 # ---------------------------------------------------------------------- timing
 
 
-def bench_ms(fn: Callable[..., Any], *args: Any, warmup_ms: int = 25, rep_ms: int = 100, **kwargs: Any) -> float:
+def bench_ms(
+    fn: Callable[..., Any],
+    *args: Any,
+    warmup_ms: int = 25,
+    rep_ms: int = 100,
+    **kwargs: Any,
+) -> float:
     """Median latency in ms. warmup_ms/rep_ms are time budgets: do_bench picks an
     iteration count that fills the budget and clears L2 between iterations."""
     from triton.testing import do_bench
 
-    return float(do_bench(lambda: fn(*args, **kwargs), warmup=warmup_ms, rep=rep_ms, return_mode="median"))
+    return float(
+        do_bench(
+            lambda: fn(*args, **kwargs),
+            warmup=warmup_ms,
+            rep=rep_ms,
+            return_mode="median",
+        )
+    )
 
 
 # ---------------------------------------------------------------------- output
@@ -93,18 +123,50 @@ def bench_ms(fn: Callable[..., Any], *args: Any, warmup_ms: int = 25, rep_ms: in
 def table(rows: Sequence[Sequence[object]], headers: Sequence[str]) -> str:
     """Markdown table; first column left-aligned, the rest right-aligned."""
     cells = [["" if v is None else str(v) for v in row] for row in rows]
-    widths = [max([len(str(h)), *(len(r[i]) for r in cells)]) for i, h in enumerate(headers)]
+    widths = [
+        max([len(str(h)), *(len(r[i]) for r in cells)]) for i, h in enumerate(headers)
+    ]
 
     def line(values: Sequence[object]) -> str:
         vals = [str(v) for v in values]
-        return "| " + " | ".join(v.ljust(widths[i]) if i == 0 else v.rjust(widths[i]) for i, v in enumerate(vals)) + " |"
+        return (
+            "| "
+            + " | ".join(
+                v.ljust(widths[i]) if i == 0 else v.rjust(widths[i])
+                for i, v in enumerate(vals)
+            )
+            + " |"
+        )
 
-    rule = "| " + " | ".join("-" * w if i == 0 else "-" * (w - 1) + ":" for i, w in enumerate(widths)) + " |"
+    rule = (
+        "| "
+        + " | ".join(
+            "-" * w if i == 0 else "-" * (w - 1) + ":" for i, w in enumerate(widths)
+        )
+        + " |"
+    )
     return "\n".join([line(headers), rule, *(line(r) for r in cells)])
 
 
 def _fmt_shape(shape: Shape) -> str:
     return "x".join(map(str, shape))
+
+
+def _bench_metrics(ms, shape, label, flops, nbytes, ref_label, ref_ms):
+    """TFLOP/s, GB/s, and speedup vs the reference. None when skipped or unused."""
+    if ms is None:
+        return None, None, None
+    tflops = flops(*shape) / ms / 1e9 if flops else None
+    gbs = nbytes(*shape) / ms / 1e6 if nbytes else None
+    if not ref_label:
+        vs = None
+    elif label == ref_label:
+        vs = 1.0
+    elif ref_ms:
+        vs = ref_ms / ms
+    else:
+        vs = None
+    return tflops, gbs, vs
 
 
 # ------------------------------------------------------------------ subcommands
@@ -124,13 +186,17 @@ def _run_test(variants, make_inputs, shapes, ref, tol) -> None:
             try:
                 torch.testing.assert_close(fn(*args), expected, **kwargs)
             except AssertionError as exc:
-                raise SystemExit(f"\n{label} is wrong at {_fmt_shape(shape)}:\n{exc}") from None
+                raise SystemExit(
+                    f"\n{label} is wrong at {_fmt_shape(shape)}:\n{exc}"
+                ) from None
         print(f"  ok  {_fmt_shape(shape)}")
     others = sum(fn is not ref for fn in variants.values())
     print(f"\n{others} variants match the reference across {len(shapes)} shapes.")
 
 
-def _run_bench(variants, make_inputs, shapes, ref, flops, nbytes, limits, out_dir, plot) -> None:
+def _run_bench(
+    variants, make_inputs, shapes, ref, flops, nbytes, limits, out_dir, plot
+) -> None:
     print(f"GPU: {torch.cuda.get_device_name()}")
     ref_label = next((label for label, fn in variants.items() if fn is ref), None)
 
@@ -148,33 +214,58 @@ def _run_bench(variants, make_inputs, shapes, ref, flops, nbytes, limits, out_di
         measured: dict[str, float | None] = {}
         for label, fn in variants.items():
             limit = limits.get(label)
-            measured[label] = None if limit is not None and max(shape) > limit else bench_ms(fn, *args)
+            measured[label] = (
+                None
+                if limit is not None and max(shape) > limit
+                else bench_ms(fn, *args)
+            )
         timings[shape] = measured
 
         ref_ms = measured.get(ref_label)
         rows = []
         for label, ms in measured.items():
+            tflops, gbs, vs = _bench_metrics(
+                ms, shape, label, flops, nbytes, ref_label, ref_ms
+            )
             if ms is None:
                 rows.append([label, "skipped"] + [""] * (len(headers) - 2))
                 continue
             row: list[object] = [label, f"{ms:.4f}"]
             if flops:
-                row.append(f"{flops(*shape) / ms / 1e9:.2f}")
+                row.append(f"{tflops:.2f}")
             if nbytes:
-                row.append(f"{nbytes(*shape) / ms / 1e6:.1f}")
+                row.append(f"{gbs:.1f}")
             if ref_label:
-                row.append("1.00x" if label == ref_label else (f"{ref_ms / ms:.2f}x" if ref_ms else ""))
+                row.append(f"{vs:.2f}x" if vs is not None else "")
             rows.append(row)
         print(f"\n### {_fmt_shape(shape)}\n\n{table(rows, headers)}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "bench.csv"
+    csv_headers = ["shape", "kernel", "latency_ms"]
+    if flops:
+        csv_headers.append("tflops")
+    if nbytes:
+        csv_headers.append("gb_s")
+    if ref_label:
+        csv_headers.append(f"vs_{ref_label}")
     with csv_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["shape", "kernel", "latency_ms"])
+        writer.writerow(csv_headers)
         for shape, measured in timings.items():
+            ref_ms = measured.get(ref_label)
             for label, ms in measured.items():
-                writer.writerow([_fmt_shape(shape), label, "" if ms is None else f"{ms:.6f}"])
+                tflops, gbs, vs = _bench_metrics(
+                    ms, shape, label, flops, nbytes, ref_label, ref_ms
+                )
+                row = [_fmt_shape(shape), label, "" if ms is None else f"{ms:.6f}"]
+                if flops:
+                    row.append("" if tflops is None else f"{tflops:.2f}")
+                if nbytes:
+                    row.append("" if gbs is None else f"{gbs:.1f}")
+                if ref_label:
+                    row.append("" if vs is None else f"{vs:.2f}")
+                writer.writerow(row)
     print(f"\nCSV: {csv_path}")
     if plot:
         print(f"Plot: {_plot(timings, out_dir)}")
@@ -188,10 +279,18 @@ def _plot(timings: dict[Shape, dict[str, float | None]], out_dir: Path) -> Path:
 
     figure, axes = plt.subplots(figsize=(10, 6))
     for label in next(iter(timings.values())):
-        points = [(max(s), timings[s][label]) for s in timings if timings[s][label] is not None]
+        points = [
+            (max(s), timings[s][label])
+            for s in timings
+            if timings[s][label] is not None
+        ]
         if points:
-            axes.plot([x for x, _ in points], [y for _, y in points], marker="o", label=label)
-    axes.set(xscale="log", yscale="log", xlabel="size (largest dim)", ylabel="latency (ms)")
+            axes.plot(
+                [x for x, _ in points], [y for _, y in points], marker="o", label=label
+            )
+    axes.set(
+        xscale="log", yscale="log", xlabel="size (largest dim)", ylabel="latency (ms)"
+    )
     axes.set_title("Latency vs size (CUDA events, median)")
     axes.grid(True, which="both", alpha=0.3)
     axes.legend()
@@ -207,11 +306,16 @@ def _named_fn(func, name, params):
     names artifacts after the function and config columns after its parameters,
     so a bare *args wrapper would produce unreadable CSVs."""
     namespace = {"_inner": func}
-    exec(f"def {name}({', '.join(params)}): return _inner({', '.join(params)})", namespace)
+    exec(
+        f"def {name}({', '.join(params)}): return _inner({', '.join(params)})",
+        namespace,
+    )
     return namespace[name]
 
 
-def _nsight_sweep(variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path):
+def _nsight_sweep(
+    variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
+):
     """Time the sweep with Nsight Compute instead of CUDA events. Costs minutes,
     not seconds: wall time scales with shapes x variants x runs."""
     import nsight
@@ -222,11 +326,17 @@ def _nsight_sweep(variants, make_inputs, shapes, limits, out_dir, stem, runs, ti
         limit = limits.get(label)
         return limit is not None and max(shape) > limit
 
-    dropped = sorted({label for shape in shapes for label in variants if skipped(label, shape)})
+    dropped = sorted(
+        {label for shape in shapes for label in variants if skipped(label, shape)}
+    )
     if dropped:
-        print(f"Skipping {', '.join(dropped)} above its limit -- use --shape to profile it smaller.")
+        print(
+            f"Skipping {', '.join(dropped)} above its limit -- use --shape to profile it smaller."
+        )
     n = len(variants) - len(dropped)
-    print(f"Nsight will replay ~{len(shapes) * n * runs} regions ({len(shapes)} shapes x {n} variants x {runs} runs).")
+    print(
+        f"Nsight will replay ~{len(shapes) * n * runs} regions ({len(shapes)} shapes x {n} variants x {runs} runs)."
+    )
 
     def body(*shape):
         args = make_inputs(*shape)
@@ -235,7 +345,9 @@ def _nsight_sweep(variants, make_inputs, shapes, limits, out_dir, stem, runs, ti
                 with nsight.annotate(label):  # one region per launch -> one series
                     fn(*args)
 
-    body = _named_fn(body, f"{stem}_sweep", list(inspect.signature(make_inputs).parameters))
+    body = _named_fn(
+        body, f"{stem}_sweep", list(inspect.signature(make_inputs).parameters)
+    )
     run = nsight.analyze.kernel(
         configs=[tuple(shape) for shape in shapes],
         runs=runs,
@@ -249,10 +361,17 @@ def _nsight_sweep(variants, make_inputs, shapes, limits, out_dir, stem, runs, ti
     if plot_path:
         import matplotlib as mpl
 
-        mpl.rcParams["savefig.dpi"] = 200  # nsight's savefig honours this, default is 100
-        run = nsight.analyze.plot(filename=str(plot_path), title=title, plot_type="line",
-                                  ylabel=f"gpu__time_duration.sum (avg of {runs})",
-                                  plot_width=12, plot_height=7)(run)
+        mpl.rcParams["savefig.dpi"] = (
+            200  # nsight's savefig honours this, default is 100
+        )
+        run = nsight.analyze.plot(
+            filename=str(plot_path),
+            title=title,
+            plot_type="line",
+            ylabel=f"gpu__time_duration.sum (avg of {runs})",
+            plot_width=12,
+            plot_height=7,
+        )(run)
 
     print(run().to_dataframe().to_string(index=False))
     print(f"\nArtifacts: {out_dir}")
@@ -261,10 +380,18 @@ def _nsight_sweep(variants, make_inputs, shapes, limits, out_dir, stem, runs, ti
 # ----------------------------------------------------------------------- entry
 
 
-def main(variants: Mapping[str, Callable], *, make_inputs: Callable[..., tuple], shapes: Sequence[Shape],
-         check_shapes: Sequence[Shape] | None = None, ref: Callable | None = None,
-         flops: Callable[..., float] | None = None, nbytes: Callable[..., float] | None = None,
-         limits: Mapping[str, int] | None = None, tol: Mapping[str, float] | None = None) -> None:
+def main(
+    variants: Mapping[str, Callable],
+    *,
+    make_inputs: Callable[..., tuple],
+    shapes: Sequence[Shape],
+    check_shapes: Sequence[Shape] | None = None,
+    ref: Callable | None = None,
+    flops: Callable[..., float] | None = None,
+    nbytes: Callable[..., float] | None = None,
+    limits: Mapping[str, int] | None = None,
+    tol: Mapping[str, float] | None = None,
+) -> None:
     """Give a kernel folder its `test` / `bench` / `profile` commands.
 
     variants     {label: callable(*inputs)} -- the reference belongs here too
@@ -280,26 +407,57 @@ def main(variants: Mapping[str, Callable], *, make_inputs: Callable[..., tuple],
     shapes = [tuple(shape) for shape in shapes]
     limits = limits or {}
 
-    parser = argparse.ArgumentParser(prog=f"cuda-lab ... {stem}", description=f"{stem} kernel lab")
+    parser = argparse.ArgumentParser(
+        prog=f"cuda-lab ... {stem}", description=f"{stem} kernel lab"
+    )
     parser.set_defaults(cmd="test")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("test", help="check every variant against the reference")
     bench = sub.add_parser("bench", help="latency sweep (seconds)")
     bench.add_argument("--plot", action="store_true", help="save a latency-vs-size PNG")
-    bench.add_argument("--nsight", action="store_true", help="re-time the sweep with Nsight (minutes)")
-    bench.add_argument("--runs", type=int, default=1, help="Nsight runs per point (default 1; locked clocks barely vary)")
+    bench.add_argument(
+        "--nsight", action="store_true", help="re-time the sweep with Nsight (minutes)"
+    )
+    bench.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="Nsight runs per point (default 1; locked clocks barely vary)",
+    )
     profile = sub.add_parser("profile", help="Nsight counters at one shape (minutes)")
-    profile.add_argument("--shape", help=f"e.g. 2048 or 2048x2048x2048 (default {_fmt_shape(shapes[-1])})")
+    profile.add_argument(
+        "--shape",
+        help=f"e.g. 2048 or 2048x2048x2048 (default {_fmt_shape(shapes[-1])})",
+    )
     args = parser.parse_args()
 
     if args.cmd == "test":
         _run_test(variants, make_inputs, check_shapes or shapes, ref, tol)
     elif args.cmd == "bench" and args.nsight:
         out = RESULTS / "profiles" / stem
-        _nsight_sweep(variants, make_inputs, shapes, limits, out, stem, args.runs,
-                      f"{stem}: execution time", out / f"{stem}_sweep.png")
+        _nsight_sweep(
+            variants,
+            make_inputs,
+            shapes,
+            limits,
+            out,
+            stem,
+            args.runs,
+            f"{stem}: execution time",
+            out / f"{stem}_sweep.png",
+        )
     elif args.cmd == "bench":
-        _run_bench(variants, make_inputs, shapes, ref, flops, nbytes, limits, RESULTS / "bench" / stem, args.plot)
+        _run_bench(
+            variants,
+            make_inputs,
+            shapes,
+            ref,
+            flops,
+            nbytes,
+            limits,
+            RESULTS / "bench" / stem,
+            args.plot,
+        )
     else:
         if args.shape:
             parts = [int(p) for p in re.split(r"[,x]", args.shape) if p]
@@ -307,5 +465,14 @@ def main(variants: Mapping[str, Callable], *, make_inputs: Callable[..., tuple],
         else:
             shape = shapes[-1]
         print(f"Profiling {stem} at {_fmt_shape(shape)} (one shape, one run).")
-        _nsight_sweep(variants, make_inputs, [shape], limits, RESULTS / "profiles" / stem, stem, 1,
-                      f"{stem} @ {_fmt_shape(shape)}", None)
+        _nsight_sweep(
+            variants,
+            make_inputs,
+            [shape],
+            limits,
+            RESULTS / "profiles" / stem,
+            stem,
+            1,
+            f"{stem} @ {_fmt_shape(shape)}",
+            None,
+        )

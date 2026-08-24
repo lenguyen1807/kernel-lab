@@ -19,7 +19,9 @@ COMMANDS = ("test", "bench", "profile")
 
 def available() -> list[str]:
     return sorted(
-        path.parent.name for path in KERNELS_DIR.glob("*/main.py") if not path.parent.name.startswith(".")
+        path.parent.name
+        for path in KERNELS_DIR.glob("*/main.py")
+        if not path.parent.name.startswith(".")
     )
 
 
@@ -36,7 +38,9 @@ def main(argv: list[str] | None = None) -> None:
     kernel_dir = (KERNELS_DIR / args.kernel).resolve()
     script = kernel_dir / "main.py"
     if not script.is_file():
-        raise SystemExit(f"No lab/kernels/{args.kernel}/main.py. Available: {', '.join(available())}")
+        raise SystemExit(
+            f"No lab/kernels/{args.kernel}/main.py. Available: {', '.join(available())}"
+        )
 
     # Kernel folders may import sibling packages (e.g. 01_vecadd/triton_dsl).
     saved_argv = sys.argv

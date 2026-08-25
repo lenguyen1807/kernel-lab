@@ -71,5 +71,4 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
-*.ncu-rep
-*.ncu-rep.lock
+*.ncu-rep.lock // keep .ncu-rep for performance analysis

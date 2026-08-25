@@ -261,6 +261,250 @@ Occupancy is not utilization or a performance score. A large warp-stall
 percentage is not a diagnosis. `Long Scoreboard` can be normal for dependent
 memory operations, while `LG Throttle` matters only in context.
 
+## How to read Nsight Compute
+
+### What “GPU SOL” means
+
+SOL means Speed of Light: NCU’s estimate of a hardware unit’s sustainable ceiling.
+
+A typical SOL percentage is approximately:
+
+$$
+\text{SOL\%} = \frac{\text{measured rate during the kernel}}
+{\text{NCU peak sustained rate}}
+\times 100
+$$
+
+The important words are:
+
+- **Rate**, not total work.
+- **Peak sustained**, not necessarily the marketing theoretical peak or a one-cycle burst.
+- During elapsed kernel time, including cycles where that unit was idle.
+- Often a composite metric: the maximum utilization among several constituent counters.
+
+The full metric behind “Compute (SM) Throughput,” for example, is shaped like:
+
+```text
+sm__throughput.avg.pct_of_peak_sustained_elapsed
+│               │   │                        │
+unit            rollup normalization         time basis
+```
+
+That decodes as:
+- **sm**: measured on the streaming multiprocessors.
+- **throughput**: a composite of relevant SM pipelines.
+- **avg**: averaged across SM instances.
+- **pct_of_peak_sustained**: normalized to NCU’s sustained peak model.
+- **elapsed**: divided by the entire elapsed interval, not only cycles where the unit was active.
+
+Therefore:
+
+> “Memory Throughput = 87.33%” does not mean every memory subsystem is 87.33% busy.
+
+It means the busiest relevant memory constituent reached 87.33% of its sustained peak.
+
+### First learn the metric grammar
+
+When you see any NCU number, ask five mechanical questions:
+
+1. What hardware unit?
+    sm, smsp, l1tex, lts/L2, dram, etc.
+
+2. What is counted?
+    Bytes, sectors, instructions, active cycles, requests, warps?
+
+3. How is it aggregated?
+    sum, avg, min, or max across hardware instances?
+
+4. What is the time basis?
+    active counts only cycles when the unit is active; elapsed includes the complete measurement
+    interval.
+
+5. Is it absolute or normalized?
+    Bytes, bytes/s, instructions/cycle, or percentage of peak?
+
+Do not interpret a percentage until those five answers are clear.
+
+> Read more at [metrics guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-guide)
+
+### Read the launch identity first
+
+The scalar vecadd report header contains
+
+```text
+Size:       (131072, 1, 1) x (256, 1, 1)
+Time:       243.65 us
+Cycles:     258,665
+SM clock:   1.06 GHz
+Registers:  16/thread
+```
+
+The left size tuple is the grid and the right tuple is the block:
+
+```text
+131,072 blocks x 256 threads/block
+```
+
+For the scalar kernel,
+
+```text
+131,072 x 256 = 33,554,432 = N
+```
+
+so this is the intended largest shape with one thread per element. Verify the
+kernel name, shape, grid, and block before interpreting performance counters. A
+report for the wrong launch answers the wrong question precisely.
+
+The duration and cycle count express approximately the same interval in
+different units:
+
+```text
+243.648 us x 1.061634 GHz ~= 258,665 cycles
+```
+
+Nsight Compute controls clocks and may replay the kernel to collect incompatible
+counters. Use this duration to compare reports collected with the same settings,
+not as a replacement for the ordinary benchmark.
+
+`16 registers/thread` is a static resource allocation for this compiled kernel.
+It does not by itself show that registers limit performance. That requires
+combining registers per thread with threads per block, resident blocks per SM,
+and the occupancy limits reported later.
+
+### Decode the vecadd SOL table literally
+
+The scalar report shows
+
+| Metric | Value | Literal reading |
+| --- | ---: | --- |
+| Memory Throughput | 87.33% | Highest normalized throughput among the selected memory constituents |
+| DRAM Throughput | 87.33% | Highest normalized throughput among the selected DRAM constituents |
+| L2 Throughput | 82.85% | Highest normalized throughput among the selected L2 constituents |
+| L1/TEX Throughput | 20.20% | Highest normalized throughput among the selected L1/TEX constituents |
+| Compute (SM) Throughput | 15.11% | Highest normalized throughput among the selected SM execution constituents |
+
+The high-level Memory Throughput equals DRAM Throughput because DRAM is the
+largest constituent in this report:
+
+```text
+max(DRAM 87.33%, L2 82.85%, L1/TEX 20.20%, ...) = 87.33%
+```
+
+This table does not contain cache hit rates. Throughput and hit rate have
+different denominators:
+
+```text
+cache throughput = transferred work / capacity per unit time
+cache hit rate    = cache hits / cache lookups
+```
+
+A streaming kernel can have high L2 throughput without temporal reuse: data is
+passing through L2 quickly, not necessarily being found there repeatedly.
+
+Likewise, Compute (SM) Throughput is not the percentage of peak useful fp32
+FLOP/s. It is a composite over several SM execution pipelines, including
+load/store, address, arithmetic, and control instructions. In this report the
+load/store instruction constituent is about 15.09%, which nearly determines the
+15.11% composite. Expand **GPU Throughput Breakdown** before assigning a
+meaning to the headline number.
+
+### Useful bandwidth and hardware bandwidth are different
+
+Nsight Compute reports approximately 1.69 TB/s at the DRAM interface. Dividing
+that by the A100 PCIe's nominal 1.935 TB/s gives the reported SOL value:
+
+```text
+1.69 / 1.935 ~= 87.3%
+```
+
+The analytical model uses useful algorithmic bytes instead:
+
+```text
+useful bytes = 12N
+             = 12 x 33,554,432
+             = 402,653,184 bytes
+
+useful bandwidth = 402,653,184 bytes / 243.648 us
+                 ~= 1.653 TB/s
+```
+
+Both numbers are valid, but their numerators differ:
+
+- useful bandwidth counts the `12N` bytes required by the algorithm;
+- hardware DRAM bandwidth counts transactions observed at the DRAM interface.
+
+Transaction-level traffic can differ from the useful-byte model. Do not silently
+substitute one bandwidth for the other; compare them and investigate a material
+gap using sector and byte counters.
+
+### Activity, throughput, and occupancy are different
+
+The report contains approximately
+
+```text
+elapsed cycles:   258,665
+SM active cycles: 254,330 average
+```
+
+so the SMs were active for roughly
+
+```text
+254,330 / 258,665 ~= 98.3%
+```
+
+An active SM has resident work. It need not issue an instruction every cycle,
+and its arithmetic pipelines need not be busy. An SM can remain active while
+all its resident warps wait for memory. Therefore these measurements are
+compatible:
+
+```text
+SM active cycles       ~= 98% of elapsed cycles
+Compute (SM) Throughput = 15.11% of sustained peak
+```
+
+Neither value is occupancy. Occupancy is the number of resident warps relative
+to the hardware's residency limit; activity says whether work is present;
+throughput says how quickly a hardware unit is processing work.
+
+The report also shows `151.70 Waves Per SM`. With 256-thread blocks, each block
+contains eight warps. A GA100 SM can hold 64 warps, so the warp limit permits
+eight such blocks per SM. Across 108 SMs, one full wave is approximately
+
+```text
+108 SMs x 8 blocks/SM = 864 blocks
+```
+
+and the launch contains
+
+```text
+131,072 blocks / 864 blocks/wave ~= 151.70 waves
+```
+
+This says the grid is much larger than the GPU's instantaneous residency, so
+the final partial wave is a small fraction of the launch. Waves per SM is not an
+occupancy percentage.
+
+### Stop at observation before claiming causality
+
+From the SOL section alone, the supported observations are
+
+- DRAM is the most highly utilized reported subsystem at 87.33%;
+- L2 is also highly utilized at 82.85%;
+- no reported SM execution constituent exceeds about 15.11%;
+- the DRAM interface transfers approximately 1.69 TB/s.
+
+The SOL section alone does not establish that Long Scoreboard, occupancy, or
+instruction pressure limits performance. Those claims require the memory,
+scheduler, warp-state, and instruction sections. The key sanity question is:
+
+> How can an SM be active for 98% of elapsed cycles while its Compute
+> Throughput is only 15%?
+
+The answer is the distinction between having resident work and issuing useful
+work at a high rate. That distinction is required before interpreting occupancy
+or warp stalls.
+
+
 ## Measurement discipline
 
 Use `bench` for performance and `profile` for explanations. Nsight Compute

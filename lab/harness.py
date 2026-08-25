@@ -5,7 +5,7 @@ hand both to `main()`, which provides three subcommands:
 
     test     correctness vs a reference          instant
     bench    latency sweep via CUDA events       seconds
-    profile  Nsight Compute counters, one shape  minutes
+    profile  .ncu-rep reports, one shape         minutes
 
 `bench` answers *how fast*. `profile` answers *why*.
 """
@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import inspect
-import io
 import re
 import shutil
 import subprocess
@@ -39,24 +37,29 @@ Shape = tuple[int, ...]
 # --------------------------------------------------------------------- building
 
 
-def _nvidia_wheel_paths() -> tuple[list[str], list[str]]:
-    """Include/lib paths for pip-installed NVIDIA CUDA libraries (e.g. cuBLAS)."""
-    try:
-        import nvidia
-    except ImportError:
-        return [], []
+def _cublas_flags() -> tuple[list[str], list[str]]:
+    """(extra nvcc flags, extra ldflags) for cuBLAS. Headers and libs come from
+    the CUDA_HOME toolkit when it ships cuBLAS -- CCCL hard-errors when the
+    compiler and toolkit headers come from different releases, so the wheel
+    include dir must never shadow them. The pip NVIDIA wheels are only a
+    fallback for toolkits without cuBLAS, include dir trailing as -isystem."""
+    from torch.utils.cpp_extension import CUDA_HOME
 
-    includes, ldflags = [], []
+    if CUDA_HOME and (Path(CUDA_HOME) / "include" / "cublas_v2.h").exists():
+        return [], ["-lcublas"]
+
+    import nvidia
+
+    cuda_flags, ldflags = [], []
     for root in (Path(p).resolve() for p in getattr(nvidia, "__path__", [])):
-        includes += [
-            str(p) for p in sorted(root.glob("cu[0-9]*/include"))
-        ]  # cu12/cu13, not cudnn
+        for include_dir in sorted(root.glob("cu[0-9]*/include")):  # cu12/cu13, not cudnn
+            cuda_flags += ["-isystem", str(include_dir)]
         for lib_dir in sorted(root.glob("cu[0-9]*/lib")):
             ldflags += [f"-L{lib_dir}", f"-Wl,-rpath,{lib_dir}"]
             # Wheel ships versioned sonames (libcublas.so.13), no libcublas.so.
             if libs := sorted(lib_dir.glob("libcublas.so.*")):
                 ldflags.append(f"-l:{libs[0].name}")
-    return includes, ldflags
+    return cuda_flags, ldflags
 
 
 def kernel_stem(kernel_dir: Path) -> str:
@@ -85,13 +88,12 @@ def load_kernel(
     )
     if not sources:
         raise FileNotFoundError(f"No C++/CUDA sources under {kernel_dir / source_dir}")
-    includes, ldflags = _nvidia_wheel_paths()
+    cublas_nvcc_flags, cublas_ldflags = _cublas_flags()
     return load(
         name=name or f"{kernel_stem(kernel_dir)}_ext",
         sources=[str(p) for p in sources],
-        extra_cuda_cflags=list(flags),
-        extra_ldflags=ldflags,
-        extra_include_paths=includes,
+        extra_cuda_cflags=[*flags, *cublas_nvcc_flags],
+        extra_ldflags=cublas_ldflags,
         verbose=verbose,
     )
 
@@ -334,115 +336,71 @@ def _plot(
     return path
 
 
-def _named_fn(func, name, params):
-    """Rebuild `func` with explicit positional parameters `params`: nsight-python
-    names artifacts after the function and config columns after its parameters,
-    so a bare *args wrapper would produce unreadable CSVs."""
-    namespace = {"_inner": func}
-    exec(
-        f"def {name}({', '.join(params)}): return _inner({', '.join(params)})",
-        namespace,
-    )
-    return namespace[name]
-
-
 def _over_limit(limits, label, shape) -> bool:
     limit = limits.get(label)
     return limit is not None and max(shape) > limit
 
 
-def _nsight_python_usable() -> bool:
-    """nsight-python drives the local ncu CLI and refuses anything older than
-    ncu 2026.2 (CUDA 13.3). On older toolkits the harness falls back to driving
-    ncu directly, so ask nsight's own version check instead of duplicating it."""
-    try:
-        import nsight  # noqa: F401
-        from nsight.collection.ncu import check_ncu_version
-
-        ncu = shutil.which("ncu")
-        return ncu is not None and check_ncu_version(ncu) is None
-    except Exception:
-        return False
-
-
-def _nsight_sweep(
-    variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
-):
-    """Time the sweep with Nsight Compute instead of CUDA events. Costs minutes,
-    not seconds: wall time scales with shapes x variants x runs."""
-    if not _nsight_python_usable():
-        return _ncu_sweep(
-            variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
-        )
-    import nsight
-
+def _profile_ncu_rep(variants, shape, limits, out_dir, stem) -> None:
+    """One .ncu-rep per variant at a single shape, for interactive inspection
+    in the Nsight Compute GUI. Always drives the ncu CLI directly, filtered to
+    a single NVTX-annotated launch via the `_nvtx-run` probe."""
+    ncu = shutil.which("ncu")
+    if ncu is None:
+        raise SystemExit("Cannot profile: no ncu on PATH.")
     print(f"GPU: {torch.cuda.get_device_name()} (Nsight locks clocks to base)")
 
-    def skipped(label, shape):
-        return _over_limit(limits, label, shape)
-
-    dropped = sorted(
-        {label for shape in shapes for label in variants if skipped(label, shape)}
-    )
-    if dropped:
-        print(
-            f"Skipping {', '.join(dropped)} above its limit -- use --shape to profile it smaller."
-        )
-    n = len(variants) - len(dropped)
-    print(
-        f"Nsight will replay ~{len(shapes) * n * runs} regions ({len(shapes)} shapes x {n} variants x {runs} runs)."
-    )
-
-    def body(*shape):
-        args = make_inputs(*shape)
-        for label, fn in variants.items():
-            if not skipped(label, shape):
-                with nsight.annotate(label):  # one region per launch -> one series
-                    _resolve(fn, shape)(*args)
-
-    body = _named_fn(
-        body, f"{stem}_sweep", list(inspect.signature(make_inputs).parameters)
-    )
-    run = nsight.analyze.kernel(
-        configs=[tuple(shape) for shape in shapes],
-        runs=runs,
-        clock_control="base",
-        # torch/cuBLAS may launch several kernels per call; range replay sums them.
-        replay_mode="range",
-        combine_kernel_metrics=lambda x, y: x + y,
-        output_prefix=str(out_dir / f"{stem}_"),
-        output_csv=True,
-    )(body)
-    if plot_path:
-        import matplotlib as mpl
-
-        mpl.rcParams["savefig.dpi"] = (
-            200  # nsight's savefig honours this, default is 100
-        )
-        run = nsight.analyze.plot(
-            filename=str(plot_path),
-            title=title,
-            plot_type="line",
-            ylabel=f"gpu__time_duration.sum (avg of {runs})",
-            plot_width=12,
-            plot_height=7,
-        )(run)
-
-    print(run().to_dataframe().to_string(index=False))
-    print(f"\nArtifacts: {out_dir}")
+    script = Path(sys.argv[0]).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shape_str = _fmt_shape(shape)
+    for label in variants:
+        if _over_limit(limits, label, shape):
+            print(f"  skip {label:<12} above its limit -- use --shape to go smaller.")
+            continue
+        report = out_dir / f"{stem}_{label}_{shape_str}"
+        cmd = [
+            ncu,
+            "--nvtx",
+            "--nvtx-include",
+            f"{label}/",
+            "--clock-control",
+            "base",
+            "--set",
+            "full",
+            "-f",
+            "-o",
+            str(report),
+            sys.executable,
+            str(script),
+            "_nvtx-run",
+            label,
+            shape_str,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            # ncu prints its ==ERROR== diagnostics to stdout, not stderr.
+            sys.stderr.write(proc.stdout + proc.stderr)
+            raise SystemExit(f"ncu failed for {label} @ {shape_str} (exit {proc.returncode})")
+        print(f"  {label:<12} -> {report}.ncu-rep")
+    print(f"\nOpen with: ncu-ui {out_dir}/<file>.ncu-rep")
 
 
-# ------------------------------------------------------- ncu CLI fallback
+# ------------------------------------------------------------------ profile
+
+
+def _parse_shape(text: str, dims: int) -> Shape:
+    """'2048' or '2048x1024x512' -> tuple; a bare number broadcasts to `dims`."""
+    parts = [int(p) for p in re.split(r"[,x]", text) if p]
+    return tuple(parts * dims if len(parts) == 1 else parts)
 
 
 def _nvtx_probe(variants, make_inputs, label, shape_str, dims, stem) -> None:
     """Run one variant once inside nested NVTX ranges `<stem>` > `<label>`, so
-    the ncu CLI fallback can profile exactly that launch; `--nvtx-include`
-    matches any enclosing range, so both names work as filters."""
+    ncu can profile exactly that launch; `--nvtx-include` matches any enclosing
+    range, so both names work as filters."""
     if label not in variants:
         raise SystemExit(f"unknown variant {label!r}; choices: {', '.join(variants)}")
-    parts = [int(p) for p in re.split(r"[,x]", shape_str) if p]
-    shape = tuple(parts * dims if len(parts) == 1 else parts)
+    shape = _parse_shape(shape_str, dims)
     fn = _resolve(variants[label], shape)
     args = make_inputs(*shape)
     fn(*args)  # warm up JIT/autotune outside the profiled range
@@ -454,151 +412,6 @@ def _nvtx_probe(variants, make_inputs, label, shape_str, dims, stem) -> None:
     torch.cuda.nvtx.range_pop()
     torch.cuda.synchronize()
     print(f"profiled {label} @ {_fmt_shape(shape)} (NVTX ranges: {stem}/{label})", file=sys.stderr)
-
-
-def _ncu_duration_ms(csv_text: str) -> tuple[float, int]:
-    """Sum gpu__time_duration.sum over the raw-page rows (a variant may launch
-    several kernels; the nsight path sums them too). Returns (ms, n_kernels)."""
-    metric = "gpu__time_duration.sum"
-    rows = list(csv.reader(io.StringIO(csv_text)))
-    header = next(
-        (i for i, row in enumerate(rows) if any(c.startswith(metric) for c in row)),
-        None,
-    )
-    if header is None:
-        raise SystemExit(f"ncu output has no {metric} column:\n{csv_text[:2000]}")
-    col = next(i for i, c in enumerate(rows[header]) if c.startswith(metric))
-    unit, total, kernels = "us", 0.0, 0
-    for row in rows[header + 1 :]:
-        if col >= len(row):
-            continue
-        try:
-            total += float(row[col].replace(",", ""))
-            kernels += 1
-        except ValueError:
-            unit = row[col] or unit  # the units row directly under the header
-    scale = {
-        "ns": 1e-6,
-        "nsecond": 1e-6,
-        "us": 1e-3,
-        "usecond": 1e-3,
-        "ms": 1.0,
-        "msecond": 1.0,
-        "s": 1e3,
-        "second": 1e3,
-    }
-    if unit not in scale:
-        raise SystemExit(f"unexpected ncu duration unit {unit!r}")
-    return total * scale[unit], kernels
-
-
-def _ncu_sweep(
-    variants, make_inputs, shapes, limits, out_dir, stem, runs, title, plot_path
-):
-    """Fallback for toolkits older than CUDA 13.3, where nsight-python rejects
-    the local ncu. Drives the ncu CLI directly: one process per
-    (shape, variant, run), NVTX-filtered down to a single annotated launch."""
-    ncu = shutil.which("ncu")
-    if ncu is None:
-        raise SystemExit(
-            "Cannot profile: nsight-python is unusable and no ncu on PATH."
-        )
-    version_out = subprocess.run([ncu, "--version"], capture_output=True, text=True)
-    found = re.search(r"Version (\S+)", version_out.stdout)
-    print(
-        "nsight-python needs ncu >= 2026.2 (CUDA 13.3); found "
-        f"{found.group(1) if found else 'unknown'} -- falling back to the ncu CLI."
-    )
-    print(f"GPU: {torch.cuda.get_device_name()} (Nsight locks clocks to base)")
-
-    active = {
-        label
-        for shape in shapes
-        for label in variants
-        if not _over_limit(limits, label, shape)
-    }
-    dropped = sorted(set(variants) - active)
-    if dropped:
-        print(
-            f"Skipping {', '.join(dropped)} above its limit -- use --shape to profile it smaller."
-        )
-    print(
-        f"ncu will launch ~{len(shapes) * len(active) * runs} processes "
-        f"({len(shapes)} shapes x {len(active)} variants x {runs} runs)."
-    )
-
-    script = Path(sys.argv[0]).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    timings: dict[Shape, dict[str, float | None]] = {}
-    for shape in shapes:
-        measured: dict[str, float | None] = {}
-        for label in variants:
-            if _over_limit(limits, label, shape):
-                measured[label] = None
-                continue
-            cmd = [
-                ncu,
-                "--nvtx",
-                "--nvtx-include",
-                f"{label}/",
-                "--clock-control",
-                "base",
-                "--metrics",
-                "gpu__time_duration.sum",
-                "--page",
-                "raw",
-                "--csv",
-                sys.executable,
-                str(script),
-                "_nvtx-run",
-                label,
-                _fmt_shape(shape),
-            ]
-            samples, kernels = [], 0
-            for _ in range(runs):
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
-                if proc.returncode != 0:
-                    # ncu prints its ==ERROR== diagnostics to stdout, not stderr.
-                    sys.stderr.write(proc.stdout)
-                    raise SystemExit(
-                        f"ncu failed for {label} @ {_fmt_shape(shape)} "
-                        f"(exit {proc.returncode}); see output above."
-                    )
-                ms, kernels = _ncu_duration_ms(proc.stdout)
-                samples.append(ms)
-            measured[label] = sum(samples) / len(samples)
-            raw = "\n".join(
-                line
-                for line in proc.stdout.splitlines()
-                if not line.startswith("==")
-            )
-            (out_dir / f"{stem}_{label}_{_fmt_shape(shape)}.csv").write_text(raw + "\n")
-            print(
-                f"  {label:<12} {_fmt_shape(shape)}: "
-                f"{measured[label]:.4f} ms ({kernels} kernels)"
-            )
-        timings[shape] = measured
-
-    rows = [
-        [_fmt_shape(shape), label, "skipped" if ms is None else f"{ms:.4f}"]
-        for shape, measured in timings.items()
-        for label, ms in measured.items()
-    ]
-    print(f"\n{table(rows, ['shape', 'kernel', 'ms (gpu__time_duration.sum)'])}")
-
-    summary = out_dir / f"{stem}_summary.csv"
-    with summary.open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["shape", "kernel", "latency_ms"])
-        for shape, measured in timings.items():
-            for label, ms in measured.items():
-                writer.writerow(
-                    [_fmt_shape(shape), label, "" if ms is None else f"{ms:.6f}"]
-                )
-    print(f"\nCSV: {summary}")
-    if plot_path:
-        print(f"Plot: {_plot(timings, plot_path, title)}")
-    print(f"Artifacts: {out_dir}")
 
 
 # ----------------------------------------------------------------------- entry
@@ -631,7 +444,7 @@ def main(
     shapes = [tuple(shape) for shape in shapes]
     limits = limits or {}
 
-    # Hidden entry point for the ncu CLI fallback, invoked as
+    # Hidden entry point for ncu profiling, invoked as
     # `python main.py _nvtx-run <label> <shape>`; not part of the public CLI.
     if len(sys.argv) > 1 and sys.argv[1] == "_nvtx-run":
         _nvtx_probe(
@@ -647,16 +460,9 @@ def main(
     sub.add_parser("test", help="check every variant against the reference")
     bench = sub.add_parser("bench", help="latency sweep (seconds)")
     bench.add_argument("--plot", action="store_true", help="save a latency-vs-size PNG")
-    bench.add_argument(
-        "--nsight", action="store_true", help="re-time the sweep with Nsight (minutes)"
+    profile = sub.add_parser(
+        "profile", help="write one .ncu-rep per variant at a single shape (minutes)"
     )
-    bench.add_argument(
-        "--runs",
-        type=int,
-        default=1,
-        help="Nsight runs per point (default 1; locked clocks barely vary)",
-    )
-    profile = sub.add_parser("profile", help="Nsight counters at one shape (minutes)")
     profile.add_argument(
         "--shape",
         help=f"e.g. 2048 or 2048x2048x2048 (default {_fmt_shape(shapes[-1])})",
@@ -665,19 +471,6 @@ def main(
 
     if args.cmd == "test":
         _run_test(variants, make_inputs, check_shapes or shapes, ref, tol)
-    elif args.cmd == "bench" and args.nsight:
-        out = RESULTS / "profiles" / stem
-        _nsight_sweep(
-            variants,
-            make_inputs,
-            shapes,
-            limits,
-            out,
-            stem,
-            args.runs,
-            f"{stem}: execution time",
-            out / f"{stem}_sweep.png",
-        )
     elif args.cmd == "bench":
         _run_bench(
             variants,
@@ -691,20 +484,6 @@ def main(
             args.plot,
         )
     else:
-        if args.shape:
-            parts = [int(p) for p in re.split(r"[,x]", args.shape) if p]
-            shape = tuple(parts * len(shapes[0]) if len(parts) == 1 else parts)
-        else:
-            shape = shapes[-1]
-        print(f"Profiling {stem} at {_fmt_shape(shape)} (one shape, one run).")
-        _nsight_sweep(
-            variants,
-            make_inputs,
-            [shape],
-            limits,
-            RESULTS / "profiles" / stem,
-            stem,
-            1,
-            f"{stem} @ {_fmt_shape(shape)}",
-            None,
-        )
+        shape = _parse_shape(args.shape, len(shapes[0])) if args.shape else shapes[-1]
+        print(f"Profiling {stem} at {_fmt_shape(shape)} (one shape, one launch per variant).")
+        _profile_ncu_rep(variants, shape, limits, RESULTS / "profiles" / stem, stem)

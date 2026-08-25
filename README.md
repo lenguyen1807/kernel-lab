@@ -52,24 +52,21 @@ python lab/kernels/02_matmul/main.py bench --plot
 | `bench` | How fast is it? | seconds |
 | `profile` | *Why* is it that fast? | minutes |
 
-**Use `bench` for numbers and `profile` for explanations.** Nsight Compute
-replays every annotated region once per metric pass, with cache flushes and
-locked clocks in between, so its cost scales with `shapes × variants × runs`
-regardless of how quick your kernel is. It is the right tool for occupancy,
-warp stalls, and memory throughput at *one* shape. It is the wrong tool for
-drawing a curve — that is what `bench` is for.
-
-If you do want Nsight-measured durations across the whole sweep, they are one
-flag away, and they will take minutes:
+**Use `bench` for numbers and `profile` for explanations.** `profile` runs
+each variant once under `ncu --set full` at a single shape and writes one
+`.ncu-rep` per variant to `results/profiles/<kernel>/` — copy the files
+elsewhere and open them in the Nsight Compute GUI (`ncu-ui`) to inspect
+occupancy, warp stalls, and memory throughput interactively. It is the wrong
+tool for drawing a curve — that is what `bench` is for.
 
 ```bash
-uv run cuda-lab bench   02_matmul --nsight   # same sweep, Nsight timing
-uv run cuda-lab profile 02_matmul            # counters at the largest shape
+uv run cuda-lab profile 02_matmul            # .ncu-rep at the largest shape
 uv run cuda-lab profile 02_matmul --shape 1024
 ```
 
-Expect `bench` and `bench --nsight` to agree on kernel *ordering* but not on
-absolute numbers: Nsight locks clocks to base, so everything looks slower.
+Nsight locks clocks to base while profiling, so durations inside a report look
+slower than `bench` numbers — compare ratios and bottleneck sections, not raw
+milliseconds.
 
 On hosts where the driver restricts performance counters to root, use the
 wrapper from the setup script, which keeps the venv and fixes file ownership
@@ -78,11 +75,6 @@ afterwards:
 ```bash
 cuda_lab_profile 02_matmul
 ```
-
-`nsight-python` requires ncu ≥ 2026.2 (CUDA 13.3). On older toolkits, `profile`
-and `bench --nsight` automatically fall back to driving the `ncu` CLI directly —
-one process per (shape, variant), NVTX-filtered to a single launch. Same
-artifacts, same locked clocks, a bit more process overhead.
 
 ## Repo map
 
@@ -96,7 +88,7 @@ lab/kernels/02_matmul/    Simon Boehm's ladder: naive → tiled → 1D → 2D.
 lab/kernels/02_matmul_pmpp/  Same algorithms, PMPP indexing idiom.
 docs/                     Profiling, roofline, and machine notes.
 results/bench/<kernel>/   bench.csv, bench.png
-results/profiles/<kernel>/  Nsight CSVs, charts, .ncu-rep
+results/profiles/<kernel>/  .ncu-rep reports
 ```
 
 ## Adding a kernel

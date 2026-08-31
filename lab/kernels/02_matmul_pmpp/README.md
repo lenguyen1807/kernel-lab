@@ -1,8 +1,8 @@
 # Matmul, PMPP style
 
 ```bash
-uv run cuda-lab test  02_matmul_pmpp
-uv run cuda-lab bench 02_matmul_pmpp --plot
+uv run kernel-lab test  02_matmul_pmpp
+uv run kernel-lab bench 02_matmul_pmpp --plot
 ```
 
 ## Full indices vs shifted pointers

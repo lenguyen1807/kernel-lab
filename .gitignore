@@ -72,3 +72,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 *.ncu-rep.lock // keep .ncu-rep for performance analysis
+*.ncu-rep.lock
+
+# macOS
+.DS_Store

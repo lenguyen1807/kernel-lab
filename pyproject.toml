@@ -1,7 +1,7 @@
 [project]
-name = "cuda-lab"
+name = "kernel-lab"
 version = "0.1.0"
-description = "A small CUDA kernel experiment harness."
+description = "A small multi-backend GPU kernel experiment harness."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -9,12 +9,10 @@ dependencies = [
     "ninja",
     "numpy",
     "torch",
-    "triton; sys_platform == 'linux'",
-    "tilelang>=0.1.13",
 ]
 
 [project.scripts]
-cuda-lab = "lab.cli:main"
+kernel-lab = "lab.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,7 +21,23 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["lab"]
 
+# Per-machine tracks. torch stays in core: PyPI serves the CUDA build on
+# linux/x86_64 and CPU/MPS on macOS. The ROCm box is the exception -- its torch
+# must come from the ROCm wheel index, so that track gets its own setup script
+# when we rent hardware; `flydsl` itself is a plain pip package.
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+]
+# NVIDIA box: setup_cuda_env.sh runs `uv sync --locked --group cuda`.
+cuda = [
+    "nsight-python; sys_platform == 'linux'",
+    "triton; sys_platform == 'linux'",
+    "tilelang>=0.1.13",
+    "helion; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl; sys_platform == 'linux'",
+]
+# AMD box (deferred): triton arrives as pytorch-triton-rocm with the ROCm torch.
+rocm = [
+    "flydsl; sys_platform == 'linux'",
 ]

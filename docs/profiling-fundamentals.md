@@ -528,7 +528,7 @@ The attempted collection did not reach GPU counters:
    performance counters to privileged processes.
 
 These are profiling-plumbing failures, not kernel evidence. The repo's
-`cuda_lab_profile` wrapper handles the permission case; tool versions must also
+`kernel_lab_profile` wrapper handles the permission case; tool versions must also
 be compatible.
 
 ## References

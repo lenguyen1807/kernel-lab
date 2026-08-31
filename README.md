@@ -1,6 +1,9 @@
-# CUDA Lab
+# Kernel Lab
 
-A personal lab for learning to write CUDA kernels for LLM inference.
+A personal lab for learning to write GPU kernels for LLM inference — CUDA
+today, ROCm/FlyDSL when an AMD box enters the picture, with Python kernel DSLs
+(Triton, Tilelang, CuTeDSL, Helion, Gluon) as first-class variants alongside
+the handwritten CUDA.
 
 Every kernel here exists twice: once as CUDA source, once as a written argument
 for why it should be fast. The harness is deliberately small — its only job is
@@ -16,8 +19,8 @@ On the CUDA machine, after SSH:
 
 ```bash
 source scripts/setup_cuda_env.sh     # toolchain, venv, sanity checks
-uv run cuda-lab test  02_matmul      # are the kernels correct?
-uv run cuda-lab bench 02_matmul      # how fast are they?
+uv run kernel-lab test  02_matmul    # are the kernels correct?
+uv run kernel-lab bench 02_matmul    # how fast are they?
 ```
 
 `bench` prints one table per shape:
@@ -60,8 +63,9 @@ occupancy, warp stalls, and memory throughput interactively. It is the wrong
 tool for drawing a curve — that is what `bench` is for.
 
 ```bash
-uv run cuda-lab profile 02_matmul            # .ncu-rep at the largest shape
-uv run cuda-lab profile 02_matmul --shape 1024
+uv run kernel-lab bench   02_matmul --nsight   # same sweep, Nsight timing
+uv run kernel-lab profile 02_matmul            # counters at the largest shape
+uv run kernel-lab profile 02_matmul --shape 1024
 ```
 
 Nsight locks clocks to base while profiling, so durations inside a report look
@@ -73,7 +77,7 @@ wrapper from the setup script, which keeps the venv and fixes file ownership
 afterwards:
 
 ```bash
-cuda_lab_profile 02_matmul
+kernel_lab_profile 02_matmul
 ```
 
 ## Repo map
@@ -82,19 +86,46 @@ cuda_lab_profile 02_matmul
 lab/harness.py            The whole harness: build, test, bench, profile.
 lab/cli.py                Finds lab/kernels/<kernel>/main.py and runs it.
 lab/kernels/utils.h       Shared CUDA macros (CHECK_INPUT, CUDA_CHECK, ...).
-lab/kernels/00_template/  Copy this to start a kernel.
 lab/kernels/01_vecadd/    Memory-bound baseline: CUDA, float4, Triton.
 lab/kernels/02_matmul/    Simon Boehm's ladder: naive → tiled → 1D → 2D.
 lab/kernels/02_matmul_pmpp/  Same algorithms, PMPP indexing idiom.
 docs/                     Profiling, roofline, and machine notes.
-results/bench/<kernel>/   bench.csv, bench.png
-results/profiles/<kernel>/  .ncu-rep reports
+results/bench/<kernel>/   bench_<gpu>.csv, bench_<gpu>.png — one set per machine
+results/profiles/<kernel>/  Nsight CSVs, charts, .ncu-rep (GPU-tagged)
 ```
+
+## Backends
+
+One torch-track harness: a variant is any callable over torch tensors, so
+Triton, Tilelang, CuTeDSL, Helion, and Gluon all drop into the same `VARIANTS`
+dict — a new DSL is a new subfolder in the kernel directory, not a new harness.
+On a ROCm box the same `main.py` works (ROCm torch exposes the CUDA API
+surface, device type included), but compiled kernels are native per vendor —
+`cuda/` for NVIDIA, `hip/` for AMD, no hipify in between:
+
+```python
+ext = harness.load_kernel(__file__, source_dir="hip" if torch.version.hip else "cuda")
+```
+
+`load_kernel` compiles `*.hip` with hipcc directly; torch only treats `.hip`
+as a GPU source on ROCm builds, so the two dirs can never be mixed up by
+accident. Register vendor-specific variants — inline PTX, CuTeDSL, MFMA —
+conditionally:
+
+```python
+if torch.version.hip is None:
+    VARIANTS["cutedsl"] = ...
+```
+
+Environments are per machine, via uv groups: core deps everywhere,
+`--group cuda` on the NVIDIA box (`setup_cuda_env.sh` does it), `--group rocm`
+once that track exists. `profile` is Nsight-only until the rocprof backend
+lands with the ROCm track.
 
 ## Adding a kernel
 
 ```bash
-cp -r lab/kernels/00_template lab/kernels/03_reduction
+cp -r lab/kernels/01_vecadd lab/kernels/03_reduction
 ```
 
 A kernel folder is a `README.md`, a `main.py`, and a `cuda/` directory. The
@@ -167,6 +198,13 @@ benchmarking without a hypothesis. See [`docs/roofline.md`](docs/roofline.md).
   its output — `zeros` launches an extra fill kernel that shows up in profiles.
 - Kernel sources are compiled with `-lineinfo` (SASS maps back to source) and
   `-Xptxas=-v` (per-kernel register and shared-memory usage in the build log).
+- **Result files are per-machine**: `bench` writes `bench_<gpu>.csv` /
+  `bench_<gpu>.png`, so sweeps from different GPUs coexist in git instead of
+  clobbering each other. Cite the GPU in the kernel README's measured table.
+- **On ROCm, torch hipifies `.cu` sources and builds them with hipcc** — the
+  build is not what breaks. What breaks is inline PTX and 32-wide-warp
+  assumptions (wavefronts are 64-wide on CDNA, e.g. MI300X; 32-wide is only
+  the RDNA default).
 
 ## Acknowledgements
 

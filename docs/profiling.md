@@ -9,7 +9,7 @@ example and PTX/SASS inspection, see
 
 ## When to reach for Nsight
 
-Only after `cuda-lab bench` has told you which kernel is worth explaining, and
+Only after `kernel-lab bench` has told you which kernel is worth explaining, and
 only when you need something latency cannot give you:
 
 - achieved vs peak memory throughput,
@@ -35,9 +35,9 @@ the kernel is. A sweep that `bench` finishes in seconds takes minutes here.
 ## Running
 
 ```bash
-uv run cuda-lab profile 02_matmul                # counters at the largest shape
-uv run cuda-lab profile 02_matmul --shape 1024   # or pick one
-uv run cuda-lab bench   02_matmul --nsight       # whole sweep, Nsight-timed
+uv run kernel-lab profile 02_matmul                # counters at the largest shape
+uv run kernel-lab profile 02_matmul --shape 1024   # or pick one
+uv run kernel-lab bench   02_matmul --nsight       # whole sweep, Nsight-timed
 ```
 
 If the driver restricts performance counters to privileged processes, use the
@@ -46,7 +46,7 @@ environment under `sudo`, then hands the artifacts back to you:
 
 ```bash
 source scripts/setup_cuda_env.sh
-cuda_lab_profile 02_matmul
+kernel_lab_profile 02_matmul
 ```
 
 Output lands in `results/profiles/<kernel>/`: aggregated CSV, PNG, the
@@ -102,10 +102,10 @@ ncu --nvtx --nvtx-include "tiled/" --set full -o tiled \
 ```
 
 On hosts where counters are root-only, this manual run needs the same sudo
-treatment as `cuda_lab_profile`:
+treatment as `kernel_lab_profile`:
 
 ```bash
-sudo -E env PATH="$PWD/.venv/bin:$PATH" TMPDIR="$HOME/.cache/cuda-lab-ncu" \
+sudo -E env PATH="$PWD/.venv/bin:$PATH" TMPDIR="$HOME/.cache/kernel-lab-ncu" \
     ncu --nvtx --nvtx-include "tiled/" --set full -o tiled \
     .venv/bin/python lab/kernels/02_matmul/main.py _nvtx-run tiled 2048x2048x2048
 ```
@@ -115,7 +115,7 @@ The `TMPDIR` matters: ncu serializes profiling through
 `/tmp` with `fs.protected_regular=2` (the default on recent kernels), root
 cannot open a lock file owned by you, and you cannot open one owned by root —
 mixing sudo and non-sudo ncu runs then fails with `InterprocessLockFailed`.
-A private, non-sticky `TMPDIR` avoids this; `cuda_lab_profile` sets one
+A private, non-sticky `TMPDIR` avoids this; `kernel_lab_profile` sets one
 automatically.
 
 ## Correctness first

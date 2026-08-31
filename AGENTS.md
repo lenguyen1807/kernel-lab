@@ -21,7 +21,7 @@ This distinction overrides every other instruction about helping me.
 **Learning surface — teach me, never do it for me:**
 
 - `lab/kernels/*/cuda/` — the CUDA kernels themselves
-- `lab/kernels/*/triton_dsl/`, `lab/kernels/*/tilelang_dsl/` — DSL variants, experimental ones included
+- `lab/kernels/*/triton_dsl/`, `lab/kernels/*/tilelang_dsl/`, and any future DSL dirs (`cutedsl/`, `flydsl/`, `helion/`, `gluon/`, ...) — DSL variants, experimental ones included
 - `lab/kernels/*/README.md` — the analysis: report findings, don't ghostwrite my argument
 
 **Plumbing — be a normal hands-on engineer:**
@@ -64,9 +64,9 @@ When `test` fails or `compute-sanitizer` flags my kernel: report the symptom, th
 `README.md` owns the mechanics — commands, repo map, gotchas. Read it before your first task here. The short version:
 
 ```bash
-uv run cuda-lab test    02_matmul   # is it correct?
-uv run cuda-lab bench   02_matmul   # how fast?
-uv run cuda-lab profile 02_matmul   # why?
+uv run kernel-lab test    02_matmul   # is it correct?
+uv run kernel-lab bench   02_matmul   # how fast?
+uv run kernel-lab profile 02_matmul   # why?
 ```
 
-One kernel folder = one `main.py` + `cuda/` + `README.md`. Results land in `results/bench/<kernel>/` and `results/profiles/<kernel>/`. Copy `lab/kernels/00_template/` to start a new kernel.
+One kernel folder = one `main.py` + `cuda/` + `README.md`. Results land in `results/bench/<kernel>/` and `results/profiles/<kernel>/`, tagged per GPU. Copy `lab/kernels/01_vecadd/` to start a new kernel.

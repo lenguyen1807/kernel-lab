@@ -4,8 +4,8 @@
 roofline argument is impossible to dodge.
 
 ```bash
-uv run cuda-lab test  01_vecadd
-uv run cuda-lab bench 01_vecadd --plot
+uv run kernel-lab test  01_vecadd
+uv run kernel-lab bench 01_vecadd --plot
 ```
 
 ## Variants

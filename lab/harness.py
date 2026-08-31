@@ -1,4 +1,4 @@
-"""Compile, check, benchmark, and profile CUDA kernels.
+"""Compile, check, benchmark, and profile GPU kernels (CUDA; ROCm-aware).
 
 One kernel folder = one `main.py`: load CUDA sources, declare a dict of variants,
 hand both to `main()`, which provides three subcommands:
@@ -30,8 +30,23 @@ RESULTS = Path(__file__).resolve().parent.parent / "results"
 # -lineinfo maps SASS back to source in Nsight; -Xptxas=-v prints per-kernel
 # register and shared-memory usage, the cheapest occupancy signal there is.
 DEFAULT_FLAGS = ("-O3", "-lineinfo", "-Xptxas=-v")
+# hipcc is clang: no -Xptxas, and -lineinfo is nvcc spelling.
+HIP_FLAGS = ("-O3",)
 
 Shape = tuple[int, ...]
+
+
+def _is_hip() -> bool:
+    return torch.version.hip is not None
+
+
+def _gpu_tag() -> str:
+    """Filename-safe GPU id: 'NVIDIA H100 SXM5' -> 'h100_sxm5'. Every artifact
+    the harness writes is tagged so results from different machines coexist."""
+    name = torch.cuda.get_device_name().lower()
+    for word in ("nvidia", "geforce", "amd", "radeon", "instinct", "corporation"):
+        name = name.replace(word, "")
+    return re.sub(r"[^a-z0-9]+", "_", name).strip("_") or "gpu"
 
 
 # --------------------------------------------------------------------- building
@@ -75,25 +90,37 @@ def load_kernel(
     flags: Sequence[str] = DEFAULT_FLAGS,
     verbose: bool = True,
 ):
-    """Compile every C++/CUDA source under `<kernel folder>/cuda/` and load it.
+    """Compile every C++/CUDA/HIP source under `<kernel folder>/<source_dir>/`.
 
-    The extension name defaults to the kernel folder, so two folders never share
-    a build cache (sharing one made torch rebuild on every switch).
+    NVIDIA builds come from `cuda/` (nvcc), AMD builds from `hip/` (native HIP
+    via hipcc -- torch recognizes .hip as a GPU source only on ROCm builds and
+    passes it through without hipifying). The extension name defaults to the
+    kernel folder, so two folders never share a build cache (sharing one made
+    torch rebuild on every switch).
     """
     kernel_dir = Path(file).resolve().parent
     sources = sorted(
         p
-        for pat in ("*.cpp", "*.cc", "*.cu")
+        for pat in ("*.cpp", "*.cc", "*.cu", "*.hip")
         for p in (kernel_dir / source_dir).glob(pat)
     )
     if not sources:
-        raise FileNotFoundError(f"No C++/CUDA sources under {kernel_dir / source_dir}")
-    cublas_nvcc_flags, cublas_ldflags = _cublas_flags()
+        raise FileNotFoundError(
+            f"No C++/CUDA/HIP sources under {kernel_dir / source_dir}"
+        )
+    if _is_hip():
+        # Native HIP path: hipcc is clang, so nvcc flags and the NVIDIA cuBLAS
+        # paths don't apply. (A .cu here would be hipified first -- portable,
+        # but hip/ exists precisely to write AMD-native source instead.)
+        extra_flags, extra_ldflags = [], []
+        flags = HIP_FLAGS if tuple(flags) == DEFAULT_FLAGS else flags
+    else:
+        extra_flags, extra_ldflags = _cublas_flags()
     return load(
         name=name or f"{kernel_stem(kernel_dir)}_ext",
         sources=[str(p) for p in sources],
-        extra_cuda_cflags=[*flags, *cublas_nvcc_flags],
-        extra_ldflags=cublas_ldflags,
+        extra_cuda_cflags=[*flags, *extra_flags],
+        extra_ldflags=extra_ldflags,
         verbose=verbose,
     )
 
@@ -274,7 +301,8 @@ def _run_bench(
         print(f"\n### {_fmt_shape(shape)}\n\n{table(rows, headers)}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = out_dir / "bench.csv"
+    tag = _gpu_tag()
+    csv_path = out_dir / f"bench_{tag}.csv"
     csv_headers = ["shape", "kernel", "latency_ms"]
     if flops:
         csv_headers.append("tflops")
@@ -301,7 +329,7 @@ def _run_bench(
                 writer.writerow(row)
     print(f"\nCSV: {csv_path}")
     if plot:
-        path = out_dir / "bench.png"
+        path = out_dir / f"bench_{tag}.png"
         print(f"Plot: {_plot(timings, path, 'Latency vs size (CUDA events, median)')}")
 
 
@@ -345,6 +373,11 @@ def _profile_ncu_rep(variants, shape, limits, out_dir, stem) -> None:
     """One .ncu-rep per variant at a single shape, for interactive inspection
     in the Nsight Compute GUI. Always drives the ncu CLI directly, filtered to
     a single NVTX-annotated launch via the `_nvtx-run` probe."""
+    if _is_hip():
+        raise SystemExit(
+            "profile is Nsight-only so far; the rocprof backend lands with the "
+            "ROCm track."
+        )
     ncu = shutil.which("ncu")
     if ncu is None:
         raise SystemExit("Cannot profile: no ncu on PATH.")
@@ -453,7 +486,7 @@ def main(
         return
 
     parser = argparse.ArgumentParser(
-        prog=f"cuda-lab ... {stem}", description=f"{stem} kernel lab"
+        prog=f"kernel-lab ... {stem}", description=f"{stem} kernel lab"
     )
     parser.set_defaults(cmd="test")
     sub = parser.add_subparsers(dest="cmd")

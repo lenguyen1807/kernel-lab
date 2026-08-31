@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Source this file after connecting over SSH:
-#   source ~/cuda-lab/scripts/setup_cuda_env.sh
+#   source <repo>/scripts/setup_cuda_env.sh
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     echo "This script must be sourced so its environment persists:" >&2
@@ -9,8 +9,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     exit 1
 fi
 
-export CUDA_LAB_ROOT
-CUDA_LAB_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export KERNEL_LAB_ROOT
+KERNEL_LAB_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export CUDA_PATH="$CUDA_HOME"
 # TORCH_CUDA_ARCH_LIST is deliberately not set: PyTorch then detects the real
@@ -42,12 +42,12 @@ for command in nvidia-smi nvcc ncu compute-sanitizer uv; do
     fi
 done
 
-cd "$CUDA_LAB_ROOT" || return 1
-uv sync --locked || return 1
+cd "$KERNEL_LAB_ROOT" || return 1
+uv sync --locked --group cuda || return 1
 
 # The NVIDIA driver on this host restricts performance counters to privileged
-# processes, so only the Nsight commands need sudo. `cuda-lab bench` does not.
-cuda_lab_profile() {
+# processes, so only the Nsight commands need sudo. `kernel-lab bench` does not.
+kernel_lab_profile() {
     local kernel="${1:-01_vecadd}"
     local status
     shift 2>/dev/null || true
@@ -58,23 +58,23 @@ cuda_lab_profile() {
     # mixing sudo and non-sudo ncu runs deadlocks on EACCES. A private,
     # non-sticky TMPDIR sidesteps protected_regular; ncu creates the lock
     # 0666, so both root and the user can open it there.
-    local ncu_tmp="$HOME/.cache/cuda-lab-ncu"
+    local ncu_tmp="$HOME/.cache/kernel-lab-ncu"
     mkdir -p "$ncu_tmp"
 
     sudo -E env \
         HOME="$HOME" \
-        PATH="$CUDA_LAB_ROOT/.venv/bin:$PATH" \
+        PATH="$KERNEL_LAB_ROOT/.venv/bin:$PATH" \
         CUDA_HOME="$CUDA_HOME" \
         CUDA_PATH="$CUDA_PATH" \
         LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
         TMPDIR="$ncu_tmp" \
-        "$CUDA_LAB_ROOT/.venv/bin/cuda-lab" profile "$kernel" "$@"
+        "$KERNEL_LAB_ROOT/.venv/bin/kernel-lab" profile "$kernel" "$@"
     status=$?
-    sudo chown -R "$(id -u):$(id -g)" "$CUDA_LAB_ROOT/results"
+    sudo chown -R "$(id -u):$(id -g)" "$KERNEL_LAB_ROOT/results"
     return "$status"
 }
 
-echo "CUDA lab ready: $CUDA_LAB_ROOT"
+echo "kernel lab ready (CUDA track): $KERNEL_LAB_ROOT"
 nvidia-smi --query-gpu=name,driver_version,memory.total \
     --format=csv,noheader
 echo "nvcc: $(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p')"
@@ -82,6 +82,6 @@ echo "ncu:  $(ncu --version | tail -n 1)"
 echo "uv:   $(uv --version)"
 python -c "import torch; print('arch:', 'sm_%d%d' % torch.cuda.get_device_capability())" 2>/dev/null
 echo
-echo "  uv run cuda-lab test  02_matmul          # correctness"
-echo "  uv run cuda-lab bench 02_matmul --plot   # latency, seconds"
-echo "  cuda_lab_profile      02_matmul          # Nsight counters, minutes"
+echo "  uv run kernel-lab test  02_matmul          # correctness"
+echo "  uv run kernel-lab bench 02_matmul --plot   # latency, seconds"
+echo "  kernel_lab_profile      02_matmul          # Nsight counters, minutes"

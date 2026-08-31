@@ -1,4 +1,4 @@
-"""`cuda-lab <command> <kernel> [options]` -> `lab/kernels/<kernel>/main.py`.
+"""`kernel-lab <command> <kernel> [options]` -> `lab/kernels/<kernel>/main.py`.
 
 Every kernel folder owns a single `main.py`; this only finds it and forwards
 the command through. Running that script directly works just as well:
@@ -27,8 +27,8 @@ def available() -> list[str]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="cuda-lab",
-        description="Test, benchmark, and profile CUDA kernels.",
+        prog="kernel-lab",
+        description="Test, benchmark, and profile GPU kernels.",
         epilog="kernels: " + ", ".join(available()),
     )
     parser.add_argument("command", choices=COMMANDS)

@@ -1,8 +1,8 @@
 # Matrix Multiplication
 
 ```bash
-uv run cuda-lab test  02_matmul
-uv run cuda-lab bench 02_matmul --plot
+uv run kernel-lab test  02_matmul
+uv run kernel-lab bench 02_matmul --plot
 ```
 
 ## Variants

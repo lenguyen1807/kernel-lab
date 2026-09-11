@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import re
 import shutil
 import subprocess
@@ -226,43 +227,73 @@ def _bench_metrics(ms, shape, label, flops, nbytes, ref_label, ref_ms):
 # ------------------------------------------------------------------ subcommands
 
 
+def _tol_kwargs(tol, shape) -> dict:
+    """assert_close tolerances for one shape. tol may be a callable (*shape)
+    -> mapping, for error bounds that scale with the shape (e.g. bf16 input
+    rounding accumulated over a k-reduction)."""
+    kwargs = {"rtol": 1e-2, "atol": 1e-2}
+    if tol:
+        kwargs.update(tol(*shape) if callable(tol) else tol)
+    return kwargs
+
+
+def _resolve_sol(sol) -> float | None:
+    """Peak TFLOP/s for the folder's dtype on the current GPU. `sol` is a
+    scalar or a {name-substring: tflops} map so one main.py can serve several
+    machines; a miss just drops the %SOL column."""
+    if sol is None:
+        return None
+    if isinstance(sol, Mapping):
+        name = torch.cuda.get_device_name().lower()
+        for key, tflops in sol.items():
+            if key.lower() in name:
+                return float(tflops)
+        print(f"note: no SOL peak declared for {name!r}; %SOL column skipped.")
+        return None
+    return float(sol)
+
+
+def _check_variant(label, fn, shape, args, expected, tol) -> None:
+    try:
+        torch.testing.assert_close(
+            _resolve(fn, shape)(*args), expected, **_tol_kwargs(tol, shape)
+        )
+    except AssertionError as exc:
+        raise SystemExit(f"\n{label} is wrong at {_fmt_shape(shape)}:\n{exc}") from None
+
+
 def _run_test(variants, make_inputs, shapes, ref, tol) -> None:
     if ref is None:
         raise SystemExit("test needs a reference: pass ref=... to harness.main()")
 
     for shape in shapes:
-        kwargs = {"rtol": 1e-2, "atol": 1e-2}
-        if tol:
-            # tol may be a callable (*shape) -> mapping, for error bounds that
-            # scale with the shape (e.g. fp16 rounding over a k-reduction).
-            kwargs.update(tol(*shape) if callable(tol) else tol)
         args = make_inputs(*shape)
         expected = ref(*args)
         for label, fn in variants.items():
             if fn is ref:
                 continue
-            try:
-                torch.testing.assert_close(
-                    _resolve(fn, shape)(*args), expected, **kwargs
-                )
-            except AssertionError as exc:
-                raise SystemExit(
-                    f"\n{label} is wrong at {_fmt_shape(shape)}:\n{exc}"
-                ) from None
+            _check_variant(label, fn, shape, args, expected, tol)
         print(f"  ok  {_fmt_shape(shape)}")
     others = sum(fn is not ref for fn in variants.values())
     print(f"\n{others} variants match the reference across {len(shapes)} shapes.")
 
 
 def _run_bench(
-    variants, make_inputs, shapes, ref, flops, nbytes, limits, out_dir, plot
+    variants, make_inputs, shapes, ref, flops, nbytes, limits, out_dir, plot,
+    tol=None, sol=None, num_input_sets=1, check=True,
 ) -> None:
-    print(f"GPU: {torch.cuda.get_device_name()}")
+    print(
+        f"GPU: {torch.cuda.get_device_name()} | torch {torch.__version__}"
+        f" | CUDA {torch.version.cuda}"
+    )
     ref_label = next((label for label, fn in variants.items() if fn is ref), None)
+    sol_tflops = _resolve_sol(sol)
 
     headers = ["Kernel", "ms"]
     if flops:
         headers.append("TFLOP/s")
+        if sol_tflops:
+            headers.append("%SOL")
     if nbytes:
         headers.append("GB/s")
     if ref_label:
@@ -270,15 +301,26 @@ def _run_bench(
 
     timings: dict[Shape, dict[str, float | None]] = {}
     for shape in shapes:
-        args = make_inputs(*shape)
+        # Distinct input sets cycled across reps: on top of do_bench's L2
+        # flush, nothing is L2-resident or bitwise-identical between reps.
+        args_list = [make_inputs(*shape) for _ in range(num_input_sets)]
+
+        # Gate: never time a kernel that computes garbage.
+        if check and ref is not None:
+            expected = ref(*args_list[0])
+            for label, fn in variants.items():
+                if fn is ref or _over_limit(limits, label, shape):
+                    continue
+                _check_variant(label, fn, shape, args_list[0], expected, tol)
+
         measured: dict[str, float | None] = {}
         for label, fn in variants.items():
-            limit = limits.get(label)
-            measured[label] = (
-                None
-                if limit is not None and max(shape) > limit
-                else bench_ms(_resolve(fn, shape), *args)
-            )
+            if _over_limit(limits, label, shape):
+                measured[label] = None
+                continue
+            resolved = _resolve(fn, shape)
+            inputs = iter(itertools.cycle(args_list))
+            measured[label] = bench_ms(lambda: resolved(*next(inputs)))
         timings[shape] = measured
 
         ref_ms = measured.get(ref_label)
@@ -293,6 +335,8 @@ def _run_bench(
             row: list[object] = [label, f"{ms:.4f}"]
             if flops:
                 row.append(f"{tflops:.2f}")
+                if sol_tflops:
+                    row.append(f"{tflops / sol_tflops:.1%}")
             if nbytes:
                 row.append(f"{gbs:.1f}")
             if ref_label:
@@ -306,6 +350,8 @@ def _run_bench(
     csv_headers = ["shape", "kernel", "latency_ms"]
     if flops:
         csv_headers.append("tflops")
+        if sol_tflops:
+            csv_headers.append("pct_sol")
     if nbytes:
         csv_headers.append("gb_s")
     if ref_label:
@@ -322,6 +368,10 @@ def _run_bench(
                 row = [_fmt_shape(shape), label, "" if ms is None else f"{ms:.6f}"]
                 if flops:
                     row.append("" if tflops is None else f"{tflops:.2f}")
+                    if sol_tflops:
+                        row.append(
+                            "" if tflops is None else f"{tflops / sol_tflops:.4f}"
+                        )
                 if nbytes:
                     row.append("" if gbs is None else f"{gbs:.1f}")
                 if ref_label:
@@ -461,6 +511,9 @@ def main(
     nbytes: Callable[..., float] | None = None,
     limits: Mapping[str, int] | None = None,
     tol: Mapping[str, float] | Callable[..., Mapping[str, float]] | None = None,
+    sol: float | Mapping[str, float] | None = None,
+    num_input_sets: int = 1,
+    check: bool = True,
 ) -> None:
     """Give a kernel folder its `test` / `bench` / `profile` commands.
 
@@ -470,6 +523,11 @@ def main(
     flops/nbytes shape -> count, for the TFLOP/s and GB/s columns
     limits       {label: max dim} -- skip a variant once it gets too slow
     tol          assert_close overrides (rtol/atol), or (*shape) -> mapping
+    sol          peak TFLOP/s for the folder's dtype, scalar or
+                 {gpu-name-substring: tflops}; enables a %SOL column
+    num_input_sets distinct input sets cycled across timed reps (>1 is
+                 stricter: nothing is bitwise-identical between reps)
+    check        verify each variant vs ref before timing it
     """
     # argv[0] is the kernel's main.py both via `cuda-lab` and standalone, so the
     # folder names the results dirs -- no load_kernel() call required.
@@ -515,6 +573,10 @@ def main(
             limits,
             RESULTS / "bench" / stem,
             args.plot,
+            tol=tol,
+            sol=sol,
+            num_input_sets=num_input_sets,
+            check=check,
         )
     else:
         shape = _parse_shape(args.shape, len(shapes[0])) if args.shape else shapes[-1]

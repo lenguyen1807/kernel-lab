@@ -87,8 +87,9 @@ lab/harness.py            The whole harness: build, test, bench, profile.
 lab/cli.py                Finds lab/kernels/<kernel>/main.py and runs it.
 lab/kernels/utils.h       Shared CUDA macros (CHECK_INPUT, CUDA_CHECK, ...).
 lab/kernels/01_vecadd/    Memory-bound baseline: CUDA, float4, Triton.
-lab/kernels/02_matmul/    Simon Boehm's ladder: naive → tiled → 1D → 2D.
+lab/kernels/02_matmul/    fp32 SIMT ladder: naive → tiled → 1D → 2D.
 lab/kernels/02_matmul_pmpp/  Same algorithms, PMPP indexing idiom.
+lab/kernels/03_matmul_sm80/  Tensor-core track: bf16, B K-major, %SOL.
 docs/                     Profiling, roofline, and machine notes.
 results/bench/<kernel>/   bench_<gpu>.csv, bench_<gpu>.png — one set per machine
 results/profiles/<kernel>/  Nsight CSVs, charts, .ncu-rep (GPU-tagged)
@@ -192,6 +193,16 @@ benchmarking without a hypothesis. See [`docs/roofline.md`](docs/roofline.md).
   folders makes torch rebuild everything each time you switch between them.
 - **Run `compute-sanitizer` after touching indexing**, before trusting any
   number: `compute-sanitizer python lab/kernels/02_matmul/main.py test`.
+- **Dtype and layout are folder-level contracts, not per-variant choices.** A
+  table only means something when every row computes the same problem in the
+  same precision — an fp16 tensor-core kernel in an fp32 folder measures the
+  hardware peak gap, not kernel quality. A variant is `f(*inputs) -> out`
+  with no casts or allocations inside the timed call.
+- **`sol=` buys honesty.** Pass the spec-sheet peak for the folder's dtype
+  (scalar or `{gpu-name-substring: tflops}`) and `bench` adds a %SOL column;
+  `num_input_sets>1` rotates distinct inputs across reps so nothing is
+  bitwise-identical or L2-resident. `bench` also verifies each variant
+  against `ref` before timing it (`check=False` to opt out).
 - **Never `torch.cuda.synchronize()` inside a variant.** It serialises the
   benchmark loop and quietly inflates that one row.
 - **Allocate with `torch.empty`, not `torch.zeros`**, when the kernel overwrites

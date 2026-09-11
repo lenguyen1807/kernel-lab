@@ -33,8 +33,9 @@ dev = [
 cuda = [
     "nsight-python; sys_platform == 'linux'",
     "triton; sys_platform == 'linux'",
-    "tilelang>=0.1.13",
+    "tilelang>=0.1.14",
     "helion; sys_platform == 'linux'",
+    "nvidia-cutlass-dsl[cu13]>=4.7.1",
     "nvidia-cutlass-dsl; sys_platform == 'linux'",
 ]
 # AMD box (deferred): triton arrives as pytorch-triton-rocm with the ROCm torch.

@@ -9,7 +9,6 @@ from __future__ import annotations
 import torch
 
 from lab import harness
-from tilelang_dsl import matmul_factory
 
 ext = harness.load_kernel(__file__)
 
@@ -21,7 +20,6 @@ VARIANTS = {
     "tiled": ext.matmul_tiled,
     "1D_coarsening": ext.matmul_1D_coarsening,
     "2D_coarsening": ext.matmul_2D_coarsening,
-    "tilelang": harness.ShapeJIT(matmul_factory),
 }
 
 
@@ -45,9 +43,6 @@ if __name__ == "__main__":
         # naive re-reads a full row and column per output element -- past 2048 it
         # costs more wall time than it teaches.
         limits={"naive": 2048},
-        # tilelang rounds its inputs to fp16; the rounding error accumulates
-        # over the k-reduction, growing ~ sqrt(k) * 2^-11, plus a tail factor
-        # from taking the max over m*n outputs (observed max abs diff: 0.037
-        # at k=1024, 0.156 at k=4096). The fp32 kernels pass this easily.
-        tol=lambda m, k, n: {"rtol": 2e-2, "atol": 3e-3 * k**0.5},
+        # fp32 CUDA-core peaks (cores x boost x 2)
+        sol={"rtx pro 4500": 54.9, "a100": 19.5, "h100": 67.0, "5090": 104.8},
     )

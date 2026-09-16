@@ -24,6 +24,7 @@ __global__ void matmul_naive_kernel(const float *A, const float *B, float *C,
 torch::Tensor matmul_naive(torch::Tensor A, torch::Tensor B) {
   CHECK_INPUT(A, torch::kFloat32)
   CHECK_INPUT(B, torch::kFloat32)
+  CHECK_SAME_DEVICE(A, B)
 
   CHECK_MATRIX(A)
   CHECK_MATRIX(B)
@@ -34,7 +35,7 @@ torch::Tensor matmul_naive(torch::Tensor A, torch::Tensor B) {
   int K = A.size(1);
   int N = B.size(1);
 
-  auto C = create_matrix({M, N});
+  auto C = create_matrix({M, N}, A);
 
   /*
   - We can use this API to find block size for

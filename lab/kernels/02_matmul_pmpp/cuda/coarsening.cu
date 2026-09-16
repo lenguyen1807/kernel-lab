@@ -75,6 +75,7 @@ template <size_t TILE_WIDTH, size_t COARSE_FACTOR>
 torch::Tensor matmul_coarsening(torch::Tensor A, torch::Tensor B) {
   CHECK_INPUT(A, torch::kFloat32)
   CHECK_INPUT(B, torch::kFloat32)
+  CHECK_SAME_DEVICE(A, B)
 
   CHECK_MATRIX(A)
   CHECK_MATRIX(B)
@@ -85,7 +86,7 @@ torch::Tensor matmul_coarsening(torch::Tensor A, torch::Tensor B) {
   int K = A.size(1);
   int N = B.size(1);
 
-  auto C = create_matrix({M, N});
+  auto C = create_matrix({M, N}, A);
 
   dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
 

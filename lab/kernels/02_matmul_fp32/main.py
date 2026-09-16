@@ -1,9 +1,3 @@
-"""Matmul, following Simon Boehm's optimisation ladder.
-
-naive -> shared-memory tiling -> 1D thread coarsening -> 2D thread coarsening,
-against an explicit cublasSgemm call and whatever torch picks.
-"""
-
 from __future__ import annotations
 
 import torch

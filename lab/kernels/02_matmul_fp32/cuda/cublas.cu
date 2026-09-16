@@ -32,6 +32,7 @@ cublasHandle_t get_cublas_handle() {
 torch::Tensor matmul_cublas(torch::Tensor A, torch::Tensor B) {
   CHECK_INPUT(A, torch::kFloat32)
   CHECK_INPUT(B, torch::kFloat32)
+  CHECK_SAME_DEVICE(A, B)
   CHECK_MATRIX(A)
   CHECK_MATRIX(B)
   TORCH_CHECK(A.size(1) == B.size(0), "A.shape[1] must equal B.shape[0]");
@@ -40,7 +41,7 @@ torch::Tensor matmul_cublas(torch::Tensor A, torch::Tensor B) {
   const int K = static_cast<int>(A.size(1));
   const int N = static_cast<int>(B.size(1));
 
-  auto C = create_matrix({M, N});
+  auto C = create_matrix({M, N}, A);
 
   const float alpha = 1.f;
   const float beta = 0.f;

@@ -19,6 +19,9 @@
 
 #define CHECK_IS_CUDA(x) \
   TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor");
+#define CHECK_SAME_DEVICE(x, y)                                             \
+  TORCH_CHECK((x).device() == (y).device(), #x " and " #y                  \
+                                               " must be on the same device");
 #define CHECK_CONTIGUOUS(x) \
   TORCH_CHECK(x.is_contiguous(), #x " must be contiguous");
 #define CHECK_DTYPE(x, expected_dtype)                                      \
@@ -32,14 +35,14 @@
 #define CHECK_INPUT(x, dtype) \
   do {                        \
     CHECK_IS_CUDA(x);         \
-    CHECK_CONTIGUOUS(x);      \
     CHECK_DTYPE(x, dtype);    \
   } while (0);
 
 // Uninitialized output storage. Callers must overwrite every element (custom
 // kernels) or use beta=0 (cuBLAS). Avoids a fill kernel that breaks single-
 // kernel nsight annotations.
-inline torch::Tensor create_matrix(const std::array<int64_t, 2>& shape) {
+inline torch::Tensor create_matrix(const std::array<int64_t, 2>& shape,
+                                   const torch::Tensor& ref) {
   return torch::empty(shape,
-                      torch::device(torch::kCUDA).dtype(torch::kFloat32));
+                      torch::device(ref.device()).dtype(ref.dtype()));
 }

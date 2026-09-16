@@ -16,11 +16,16 @@ import torch
 
 from lab import harness
 from tilelang_dsl import matmul_factory
+from triton_dsl import matmul_triton_naive
+
+ext = harness.load_kernel(__file__)
 
 VARIANTS = {
     # bf16 torch.matmul -> cuBLAS HGEMM, fp32 accumulate.
     "torch": torch.matmul,
     "tilelang": harness.ShapeJIT(matmul_factory),
+    "triton_naive": matmul_triton_naive,
+    "2D_coarsening": ext.matmul_2D_coarsening
 }
 
 

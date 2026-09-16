@@ -39,6 +39,7 @@ __global__ void vec_add_float4(const float *a, const float *b, float *c,
 torch::Tensor vecadd_cuda(torch::Tensor a, torch::Tensor b) {
   CHECK_INPUT(a, torch::kFloat32)
   CHECK_INPUT(b, torch::kFloat32)
+  CHECK_SAME_DEVICE(a, b)
 
   TORCH_CHECK(a.dim() == 1, "a must be a vector");
   TORCH_CHECK(b.dim() == 1, "b must be a vector");
@@ -62,6 +63,7 @@ torch::Tensor vecadd_cuda(torch::Tensor a, torch::Tensor b) {
 torch::Tensor vecadd_cuda_float4(torch::Tensor a, torch::Tensor b) {
   CHECK_INPUT(a, torch::kFloat32);
   CHECK_INPUT(b, torch::kFloat32);
+  CHECK_SAME_DEVICE(a, b)
 
   CHECK_VECTOR(a)
   CHECK_VECTOR(b)

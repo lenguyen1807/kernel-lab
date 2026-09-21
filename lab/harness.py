@@ -4,7 +4,7 @@ One kernel folder = one `main.py`: load CUDA sources, declare a dict of variants
 hand both to `main()`, which provides three subcommands:
 
     test     correctness vs a reference          instant
-    bench    latency sweep via CUDA events       seconds
+    bench    latency + peak-memory sweep         seconds
     profile  .ncu-rep reports, one shape         minutes
 
 `bench` answers *how fast*. `profile` answers *why*.
@@ -19,7 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +172,76 @@ def bench_ms(
     )
 
 
+def _cycling(fn: Callable[..., Any], inputs: Iterator) -> Callable[[], Any]:
+    """Zero-arg timed call rotating through the input sets. Binds `fn` and
+    `inputs` as parameters, so the closure never depends on loop state."""
+    return lambda: fn(*next(inputs))
+
+
+def peak_alloc_bytes(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> int:
+    """Extra device memory (bytes) one call allocates above its live inputs --
+    the S/P materialization a fused kernel exists to erase. Counts live
+    tensors, not the caching allocator's reserved size."""
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    fn(*args, **kwargs)
+    torch.cuda.synchronize()
+    return torch.cuda.max_memory_allocated() - before
+
+
+def _alloc_retries() -> int:
+    """Allocator near-misses so far: cudaMallocs that failed, evicted the
+    cached blocks, and were retried (the W921 stderr warnings). The retried
+    allocation usually still succeeds -- this counts pressure, not failure.
+    Read only after CUDA is initialized, or the keys are absent."""
+    return int(torch.cuda.memory_stats().get("num_alloc_retries", 0))
+
+
+_SDPA_OPS = {
+    "_scaled_dot_product_flash_attention": "flash",
+    "_scaled_dot_product_efficient_attention": "mem_efficient",
+    "_scaled_dot_product_cudnn_attention": "cudnn",
+}
+
+
+def sdpa_backend_used(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> str | None:
+    """Which fused SDPA backend actually serviced one call of `fn`.
+
+    `torch.sdpa` is a dispatcher: the winner depends on rank, dtype, head_dim,
+    and mask, and nothing in the output betrays the choice. Two stacked spy
+    modes settle it without a profiler (kineto/CUPTI init prints USDT noise
+    on every session): __torch_function__ sees the public sdpa entry for any
+    backend, __torch_dispatch__ sees the fused op the dispatcher really ran.
+    "math" means the composite fallback (bmm + softmax) ran instead of a
+    fused kernel; None means the call never touched sdpa at all.
+    """
+    from torch.overrides import TorchFunctionMode
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    called: list[bool] = []
+    fused: list[str] = []
+
+    class FnSpy(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            if "scaled_dot_product_attention" in str(func):
+                called.append(True)
+            return func(*args, **(kwargs or {}))
+
+    class DispatchSpy(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            name = str(func)
+            for op, backend in _SDPA_OPS.items():
+                if op in name:
+                    fused.append(backend)
+            return func(*args, **(kwargs or {}))
+
+    with FnSpy(), DispatchSpy():
+        fn(*args, **kwargs)
+    if fused:
+        return fused[0]
+    return "math" if called else None
+
+
 # ---------------------------------------------------------------------- output
 
 
@@ -205,6 +275,15 @@ def table(rows: Sequence[Sequence[object]], headers: Sequence[str]) -> str:
 
 def _fmt_shape(shape: Shape) -> str:
     return "x".join(map(str, shape))
+
+
+def _fmt_bytes(n: float) -> str:
+    """1234567 -> '1.2 MiB', so peak-memory cells stay compact at any scale."""
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024:
+            return f"{n:.0f} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TiB"
 
 
 def _bench_metrics(ms, shape, label, flops, nbytes, ref_label, ref_ms):
@@ -282,6 +361,10 @@ def _run_bench(
     variants, make_inputs, shapes, ref, flops, nbytes, limits, out_dir, plot,
     tol=None, sol=None, num_input_sets=1, check=True,
 ) -> None:
+    """Sweep latency (do_bench median), peak allocation, and the sdpa
+    backend actually used, one table per shape. A variant that OOMs is
+    recorded and skipped at larger shapes; allocator near-misses (retried
+    cudaMallocs) are starred and counted. The sweep survives both."""
     print(
         f"GPU: {torch.cuda.get_device_name()} | torch {torch.__version__}"
         f" | CUDA {torch.version.cuda}"
@@ -289,7 +372,7 @@ def _run_bench(
     ref_label = next((label for label, fn in variants.items() if fn is ref), None)
     sol_tflops = _resolve_sol(sol)
 
-    headers = ["Kernel", "ms"]
+    headers = ["Kernel", "ms", "peak mem"]
     if flops:
         headers.append("TFLOP/s")
         if sol_tflops:
@@ -298,30 +381,94 @@ def _run_bench(
         headers.append("GB/s")
     if ref_label:
         headers.append(f"vs {ref_label}")
+    headers.append("sdpa")
 
     timings: dict[Shape, dict[str, float | None]] = {}
+    mems: dict[Shape, dict[str, int | None]] = {}
+    backends: dict[Shape, dict[str, str | None]] = {}
+    statuses: dict[Shape, dict[str, str]] = {}
+    retries: dict[Shape, dict[str, int]] = {}
+    # A variant that OOMs at one shape is hopeless above it: remember the
+    # shape, skip the larger ones, and let the sweep survive.
+    oom_at: dict[str, Shape] = {}
     for shape in shapes:
         # Distinct input sets cycled across reps: on top of do_bench's L2
         # flush, nothing is L2-resident or bitwise-identical between reps.
         args_list = [make_inputs(*shape) for _ in range(num_input_sets)]
 
+        measured: dict[str, float | None] = {}
+        shape_mems: dict[str, int | None] = {}
+        shape_backends: dict[str, str | None] = {}
+        status: dict[str, str] = {}
+        shape_retries: dict[str, int] = {label: 0 for label in variants}
+
         # Gate: never time a kernel that computes garbage.
         if check and ref is not None:
-            expected = ref(*args_list[0])
-            for label, fn in variants.items():
-                if fn is ref or _over_limit(limits, label, shape):
-                    continue
-                _check_variant(label, fn, shape, args_list[0], expected, tol)
-
-        measured: dict[str, float | None] = {}
-        for label, fn in variants.items():
-            if _over_limit(limits, label, shape):
-                measured[label] = None
+            try:
+                expected = ref(*args_list[0])
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                print(f"\n  ref {ref_label} OOM at {_fmt_shape(shape)}; shape skipped.")
+                for label in variants:
+                    measured[label] = None
+                    shape_mems[label] = None
+                    shape_backends[label] = None
+                    status[label] = "ref_oom"
+                timings[shape] = measured
+                mems[shape] = shape_mems
+                backends[shape] = shape_backends
+                statuses[shape] = status
                 continue
+            for label, fn in variants.items():
+                if fn is ref or _over_limit(limits, label, shape) or label in oom_at:
+                    continue
+                retries_before = _alloc_retries()
+                try:
+                    _check_variant(label, fn, shape, args_list[0], expected, tol)
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    oom_at[label] = shape
+                    print(f"  {label} OOM at {_fmt_shape(shape)} during check.")
+                shape_retries[label] += _alloc_retries() - retries_before
+
+        for label, fn in variants.items():
+            if label in oom_at:
+                status[label] = "oom" if oom_at[label] == shape else "skipped_oom"
+                measured[label] = None
+                shape_mems[label] = None
+                shape_backends[label] = None
+                continue
+            if _over_limit(limits, label, shape):
+                status[label] = "skipped"
+                measured[label] = None
+                shape_mems[label] = None
+                shape_backends[label] = None
+                continue
+            status[label] = "ok"
             resolved = _resolve(fn, shape)
             inputs = iter(itertools.cycle(args_list))
-            measured[label] = bench_ms(lambda: resolved(*next(inputs)))
+            retries_before = _alloc_retries()
+            try:
+                measured[label] = bench_ms(_cycling(resolved, inputs))
+                # One untimed call each, after the timed loop: allocator warm,
+                # JIT/autotune spent. Both measurements are value-independent,
+                # so args_list[0] is as good as any rep's inputs.
+                shape_mems[label] = peak_alloc_bytes(resolved, *args_list[0])
+                shape_backends[label] = sdpa_backend_used(resolved, *args_list[0])
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                oom_at[label] = shape
+                status[label] = "oom"
+                measured[label] = None
+                shape_mems[label] = None
+                shape_backends[label] = None
+                print(f"  {label} OOM at {_fmt_shape(shape)}; larger shapes skip it.")
+            shape_retries[label] += _alloc_retries() - retries_before
         timings[shape] = measured
+        mems[shape] = shape_mems
+        backends[shape] = shape_backends
+        statuses[shape] = status
+        retries[shape] = shape_retries
 
         ref_ms = measured.get(ref_label)
         rows = []
@@ -330,9 +477,16 @@ def _run_bench(
                 ms, shape, label, flops, nbytes, ref_label, ref_ms
             )
             if ms is None:
-                rows.append([label, "skipped"] + [""] * (len(headers) - 2))
+                why = {
+                    "skipped": "skipped",
+                    "oom": "OOM",
+                    "skipped_oom": "skip>OOM",
+                    "ref_oom": "ref OOM",
+                }[status[label]]
+                rows.append([label, why] + [""] * (len(headers) - 2))
                 continue
-            row: list[object] = [label, f"{ms:.4f}"]
+            cell = f"{ms:.4f}" + ("*" if shape_retries[label] else "")
+            row: list[object] = [label, cell, _fmt_bytes(shape_mems[label])]
             if flops:
                 row.append(f"{tflops:.2f}")
                 if sol_tflops:
@@ -341,13 +495,22 @@ def _run_bench(
                 row.append(f"{gbs:.1f}")
             if ref_label:
                 row.append(f"{vs:.2f}x" if vs is not None else "")
+            row.append(shape_backends[label] or "-")
             rows.append(row)
         print(f"\n### {_fmt_shape(shape)}\n\n{table(rows, headers)}")
+        near = {l: r for l, r in shape_retries.items() if r}
+        if near:
+            detail = ", ".join(f"{l} x{r}" for l, r in near.items())
+            print(
+                f"\n*: allocator near-miss -- cudaMalloc retried after evicting "
+                f"cached blocks (W921 on stderr); the allocation still "
+                f"succeeded. {detail}"
+            )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = _gpu_tag()
     csv_path = out_dir / f"bench_{tag}.csv"
-    csv_headers = ["shape", "kernel", "latency_ms"]
+    csv_headers = ["shape", "kernel", "latency_ms", "peak_mem_bytes"]
     if flops:
         csv_headers.append("tflops")
         if sol_tflops:
@@ -356,6 +519,9 @@ def _run_bench(
         csv_headers.append("gb_s")
     if ref_label:
         csv_headers.append(f"vs_{ref_label}")
+    csv_headers.append("sdpa_backend")
+    csv_headers.append("alloc_retries")
+    csv_headers.append("status")
     with csv_path.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(csv_headers)
@@ -366,6 +532,8 @@ def _run_bench(
                     ms, shape, label, flops, nbytes, ref_label, ref_ms
                 )
                 row = [_fmt_shape(shape), label, "" if ms is None else f"{ms:.6f}"]
+                mem = mems[shape][label]
+                row.append("" if mem is None else str(mem))
                 if flops:
                     row.append("" if tflops is None else f"{tflops:.2f}")
                     if sol_tflops:
@@ -376,34 +544,51 @@ def _run_bench(
                     row.append("" if gbs is None else f"{gbs:.1f}")
                 if ref_label:
                     row.append("" if vs is None else f"{vs:.2f}")
+                row.append(backends[shape][label] or "")
+                row.append(retries[shape][label])
+                row.append(statuses[shape][label])
                 writer.writerow(row)
+    for label, shape in oom_at.items():
+        print(f"OOM recorded: {label} at {_fmt_shape(shape)} (skipped above it)")
     print(f"\nCSV: {csv_path}")
     if plot:
         path = out_dir / f"bench_{tag}.png"
         print(f"Plot: {_plot(timings, path, 'Latency vs size (CUDA events, median)')}")
+        mem_path = out_dir / f"bench_{tag}_mem.png"
+        plotted = _plot(
+            mems,
+            mem_path,
+            "Peak allocated memory vs size",
+            ylabel="bytes above live inputs",
+        )
+        print(f"Plot: {plotted}")
 
 
 def _plot(
-    timings: dict[Shape, dict[str, float | None]], path: Path, title: str
+    series: dict[Shape, dict[str, float | None]],
+    path: Path,
+    title: str,
+    ylabel: str = "latency (ms)",
 ) -> Path:
+    """Log-log curve of one metric per variant; skipped points drop out."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     figure, axes = plt.subplots(figsize=(10, 6))
-    for label in next(iter(timings.values())):
+    for label in next(iter(series.values())):
         points = [
-            (max(s), timings[s][label])
-            for s in timings
-            if timings[s][label] is not None
+            (max(s), series[s][label])
+            for s in series
+            if series[s][label] is not None
         ]
         if points:
             axes.plot(
                 [x for x, _ in points], [y for _, y in points], marker="o", label=label
             )
     axes.set(
-        xscale="log", yscale="log", xlabel="size (largest dim)", ylabel="latency (ms)"
+        xscale="log", yscale="log", xlabel="size (largest dim)", ylabel=ylabel
     )
     axes.set_title(title)
     axes.grid(True, which="both", alpha=0.3)
@@ -459,7 +644,7 @@ def _profile_ncu_rep(variants, shape, limits, out_dir, stem) -> None:
             label,
             shape_str,
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             # ncu prints its ==ERROR== diagnostics to stdout, not stderr.
             sys.stderr.write(proc.stdout + proc.stderr)
@@ -549,8 +734,12 @@ def main(
     parser.set_defaults(cmd="test")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("test", help="check every variant against the reference")
-    bench = sub.add_parser("bench", help="latency sweep (seconds)")
-    bench.add_argument("--plot", action="store_true", help="save a latency-vs-size PNG")
+    bench = sub.add_parser("bench", help="latency + peak-memory sweep (seconds)")
+    bench.add_argument(
+        "--plot",
+        action="store_true",
+        help="save latency- and peak-memory-vs-size PNGs",
+    )
     profile = sub.add_parser(
         "profile", help="write one .ncu-rep per variant at a single shape (minutes)"
     )

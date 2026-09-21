@@ -1,15 +1,3 @@
-"""Matmul on tensor cores: the sm80-style mma.sync lineage (sm80 -> sm120).
-
-Folder contract, gau-nernst style: every variant computes the same problem in
-the same dtypes and layouts -- bf16 in/out with fp32 accumulate; A is (M,K)
-row-major, B is (K,N) K-major (TN GEMM, the operand layout mma and
-cuBLAS-TN both want); inputs are scaled by K**-0.5 so outputs stay O(1).
-No casts or allocations inside a timed variant call.
-
-sm_120 note: tcgen05/tmem (sm_100) and wgmma (sm_90) do not exist on consumer
-Blackwell -- mma.sync m16n8k16 + ldmatrix + cp.async is the right lineage.
-"""
-
 from __future__ import annotations
 
 import torch

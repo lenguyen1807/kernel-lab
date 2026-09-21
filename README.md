@@ -28,17 +28,29 @@ uv run kernel-lab bench 02_matmul    # how fast are they?
 ```text
 ### 2048x2048x2048
 
-| Kernel        |      ms | TFLOP/s |   GB/s | vs torch |
-| ------------- | ------: | ------: | -----: | -------: |
-| torch         |  ...    |   ...   |  ...   |    1.00x |
-| cublas        |  ...    |   ...   |  ...   |    ...   |
-| naive         |  ...    |   ...   |  ...   |    ...   |
-| tiled         |  ...    |   ...   |  ...   |    ...   |
+| Kernel        |      ms | peak mem | TFLOP/s |   GB/s | vs torch | sdpa |
+| ------------- | ------: | -------: | ------: | -----: | -------: | ---: |
+| torch         |  ...    |    ...   |   ...   |  ...   |    1.00x |   -  |
+| cublas        |  ...    |    ...   |   ...   |  ...   |    ...   |   -  |
+| naive         |  ...    |    ...   |   ...   |  ...   |    ...   |   -  |
+| tiled         |  ...    |    ...   |   ...   |  ...   |    ...   |   -  |
 ```
 
 (Layout only — fill in your own numbers, and record the GPU alongside them.)
 
-Add `--plot` for a latency-vs-size curve under `results/bench/<kernel>/`.
+`peak mem` is the extra device memory one call allocates above its live
+inputs — the S/P-materialization line a fused kernel exists to erase.
+`sdpa` names the fused backend that actually serviced a `torch.sdpa` call
+(`flash` / `mem_efficient` / `cudnn` / `math`), `-` when the variant never
+calls sdpa: the dispatcher's choice is otherwise invisible in the result.
+A variant that OOMs at a shape is recorded (`OOM` in the table, `status=oom`
+in the CSV) and skipped at all larger shapes, so one fat shape no longer
+kills the sweep. Allocator near-misses — a `cudaMalloc` that failed, evicted
+the cache, and was retried (the `W921` stderr warning) — are starred in the
+table and counted in `alloc_retries`; the allocation still succeeded.
+
+Add `--plot` for latency-vs-size and peak-memory-vs-size curves under
+`results/bench/<kernel>/`.
 
 Each `main.py` also runs standalone, which is handy under a debugger or
 `compute-sanitizer`:

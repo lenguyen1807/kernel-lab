@@ -8,6 +8,10 @@ def attention_naive(q, k, v, causal_mask: bool = False):
     k: [1, H, N, d]
     v: [1, H, N, d]
     """
+    assert q.is_cuda
+    assert k.device == q.device
+    assert v.device == q.device
+
     scaled_qkt = torch.einsum("bhnd,bhmd->bhnm", q, k) / (k.shape[-1] ** 0.5)
     if causal_mask:
         scaled_qkt = causal_mask(scaled_qkt)
